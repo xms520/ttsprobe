@@ -192,15 +192,19 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
 }
 
 /* ==================== TTS API ==================== */
-static NSString *TiaxKey(void) { return K_APIKEY_BUILTIN; }
+static NSString *TiaxKey(void) {
+    return K_APIKEY_BUILTIN;
+}
 
 static NSString *TTSEncode(NSString *s) {
     return [s stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
 }
 
 static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
+    NSString *v = voice ?: K_DEFAULT_VOICE;
+    NSString *k = TiaxKey() ?: @"";
     NSString *urlStr = [NSString stringWithFormat:@"%@?text=%@&voice=%@&apikey=%@",
-                        K_TTS_ENDPOINT, TTSEncode(text), TTSEncode(voice ?: K_DEFAULT_VOICE), TTSEncode(TiaxKey() ?: @"")];
+                        K_TTS_ENDPOINT, TTSEncode(text), TTSEncode(v), TTSEncode(k)];
     NSURL *url = [NSURL URLWithString:urlStr];
     if (!url) { done(nil, [NSError errorWithDomain:@"TTS" code:1 userInfo:@{NSLocalizedDescriptionKey:@"URL无效"}]); return; }
 
@@ -214,8 +218,12 @@ static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *aud
             NSString *aurl = json[@"url"];
             if ([aurl isKindOfClass:[NSString class]] && aurl.length) {
                 [[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:aurl] completionHandler:^(NSData *audio, NSURLResponse *r2, NSError *e2) {
-                    if (e2 || !audio.length) done(nil, e2 ?: [NSError errorWithDomain:@"TTS" code:3 userInfo:@{NSLocalizedDescriptionKey:@"音频下载失败"}]);
-                    else { TTLog(@"[tts] mp3 %lu bytes", (unsigned long)audio.length); done(audio, nil); }
+                    if (e2 || !audio.length) {
+                        done(nil, e2);
+                    } else {
+                        TTLog(@"[tts] mp3 %lu bytes", (unsigned long)audio.length);
+                        done(audio, nil);
+                    }
                 }] resume];
                 return;
             }
@@ -442,7 +450,7 @@ static NSString *g_voiceName = K_DEFAULT_VOICE;
     self.send.enabled = NO;
     self.statusLabel.text = @"正在合成…";
     [self.spinner startAnimating];
-    NSString *voice = g_voiceName ?: K_DEFAULT_VOICE;
+    NSString *voice = g_voiceName ? g_voiceName : K_DEFAULT_VOICE;
 
     RequestTTS(text, voice, ^(NSData *audio, NSError *error) {
         if (error) { [self setStatusOnMain:[NSString stringWithFormat:@"TTS失败：%@", error.localizedDescription]]; return; }
