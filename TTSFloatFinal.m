@@ -70,48 +70,64 @@ static void LOG(NSString *fmt, ...) {
  * ============================================================ */
 static NSString *CurrentChatUser(void) {
     @autoreleasepool {
-        UIWindow *key = nil, *fb = nil;
-        for (UIWindow *w in UIApplication.sharedApplication.windows) {
-            if (w.hidden || !w.rootViewController) continue;
-            if (!fb) fb = w;
-            if (w.isKeyWindow) { key = w; break; }
-            if (w.windowLevel > 2000) continue; /* 跳过我们自己的悬浮窗 */
-        }
-        UIWindow *win = key ?: fb;
-        if (!win) return nil;
+        Class chatCls = NSClassFromString(@"BaseMsgContentViewController");
+        if (!chatCls) { LOG(@"BaseMsgContentViewController 类不存在"); return nil; }
 
-        UIViewController *vc = win.rootViewController;
-        /* 递归找 BaseMsgContentViewController 及其子类 */
-        NSMutableArray *stack = [NSMutableArray array];
-        if (vc) [stack addObject:vc];
-        while (stack.count > 0) {
-            UIViewController *cur = stack.lastObject; [stack removeLastObject];
-            if (!cur) continue;
-            /* 按 hook 脚本验证的字段顺序探测 */
-            NSArray *keys = @[@"m_username", @"username", @"m_chatContact", @"chatContact",
-                              @"m_contact", @"contact", @"m_nsChatName", @"nsChatName",
-                              @"m_nsChatUsername", @"m_nsToUsr"];
-            for (NSString *k in keys) {
-                @try {
-                    id v = [cur valueForKey:k];
-                    if (v && ![v isKindOfClass:[NSNull class]]) {
-                        NSString *s = [NSString stringWithFormat:@"%@", v];
-                        if (s.length > 0 && s.length < 200) return s;
+        UIApplication *app = UIApplication.sharedApplication;
+        for (UIWindow *w in app.windows) {
+            if (w == g_ttsWindow) continue;
+            UIViewController *root = w.rootViewController;
+            if (!root) continue;
+
+            NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
+            while (queue.count) {
+                UIViewController *vc = queue.firstObject;
+                [queue removeObjectAtIndex:0];
+                if (!vc) continue;
+
+                /* 只在 BaseMsgContentViewController 及其子类上探测 */
+                if ([vc isKindOfClass:chatCls]) {
+                    LOG(@"[VC] 命中聊天页 %@", NSStringFromClass(vc.class));
+                    /* KVC 探测字段（valueForKey 支持属性 getter + ivar） */
+                    NSArray *keys = @[@"m_username", @"m_chatContact", @"m_contact",
+                                      @"m_nsChatUsername", @"m_nsChatName", @"m_oContact"];
+                    for (NSString *k in keys) {
+                        @try {
+                            id v = [vc valueForKey:k];
+                            if (v && v != [NSNull null]) {
+                                /* 若 v 是 contact 对象，取其用户名 */
+                                NSString *s = nil;
+                                if ([v isKindOfClass:[NSString class]]) s = v;
+                                else {
+                                    @try {
+                                        id u = [v valueForKey:@"m_nsUsrName"];
+                                        if (u && [u isKindOfClass:[NSString class]]) s = u;
+                                    } @catch (NSException *e) {}
+                                }
+                                if (s.length > 0) {
+                                    LOG(@"[VC] 拿到当前聊天用户: key=%@ val=%@", k, s);
+                                    return s;
+                                }
+                            }
+                        } @catch (NSException *e) {
+                            LOG(@"[VC] KVC %@ 异常: %@", k, e);
+                        }
                     }
-                } @catch (NSException *e) {}
-            }
-            /* 下钻 */
-            [stack addObjectsFromArray:cur.childViewControllers];
-            if (cur.presentedViewController) [stack addObject:cur.presentedViewController];
-            if ([cur isKindOfClass:[UINavigationController class]]) {
-                UINavigationController *nav = (UINavigationController*)cur;
-                if (nav.visibleViewController) [stack addObject:nav.visibleViewController];
-            }
-            if ([cur isKindOfClass:[UITabBarController class]]) {
-                UITabBarController *tab = (UITabBarController*)cur;
-                if (tab.selectedViewController) [stack addObject:tab.selectedViewController];
+                    LOG(@"[VC] 聊天页上所有字段都拿不到用户名，继续找子 VC");
+                }
+
+                /* 下钻 */
+                for (UIViewController *c in vc.childViewControllers)
+                    if (queue.count < 200) [queue addObject:c];
+                UIViewController *p = vc.presentedViewController;
+                if (p && queue.count < 200) [queue addObject:p];
+                if ([vc isKindOfClass:[UINavigationController class]]) {
+                    UIViewController *vis = ((UINavigationController*)vc).visibleViewController;
+                    if (vis && queue.count < 200) [queue addObject:vis];
+                }
             }
         }
+        LOG(@"[VC] 未找到当前聊天用户");
     }
     return nil;
 }
