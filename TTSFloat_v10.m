@@ -71,6 +71,7 @@ static void TTLog(NSString *fmt, ...) {
 
 /* ==================== 当前聊天对象捕获（v8b 验证） ==================== */
 static NSString *g_lastToUsr = nil;
+static id g_audioSender = nil;   /* prepareSend 的 self 就是 AudioSender 实例，直接存 */
 
 static void InstallPrepareSendCapture(void) {
     static dispatch_once_t once;
@@ -88,6 +89,10 @@ static void InstallPrepareSendCapture(void) {
             /* B24@0:8@16 — BOOL 返回（真机验证） */
             IMP newImp = imp_implementationWithBlock(^BOOL(id self, id arg) {
                 @try {
+                    /* self 就是 AudioSender 实例 — 存下来供发送链用 */
+                    @synchronized([NSObject class]) {
+                        if (g_audioSender != self) g_audioSender = self;
+                    }
                     if (arg) {
                         id to = [arg valueForKey:@"tousr"];
                         if ([to isKindOfClass:[NSString class]] && [(NSString *)to length] > 0) {
@@ -153,29 +158,38 @@ static NSString *CurrentChatUser(void) {
 static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     if (!pcmData.length || !toUsr.length) return @"数据为空";
 
-    /* 拿 AudioSender 单例（superclass=MMUserService → MMServiceCenter） */
+    /* 拿 AudioSender：优先用 prepareSend hook 捕获的实例（真机验证存在） */
     id audioSender = nil;
-    Class scCls = NSClassFromString(@"MMServiceCenter");
-    if (scCls) {
-        id center = nil;
-        SEL dc = NSSelectorFromString(@"defaultCenter");
-        if ([scCls respondsToSelector:dc]) center = ((id (*)(id, SEL))objc_msgSend)(scCls, dc);
-        if (!center) {
-            SEL si = NSSelectorFromString(@"sharedInstance");
-            if ([scCls respondsToSelector:si]) center = ((id (*)(id, SEL))objc_msgSend)(scCls, si);
-        }
-        if (center) {
-            SEL gs = NSSelectorFromString(@"getService:");
-            if ([center respondsToSelector:gs]) {
-                audioSender = ((id (*)(id, SEL, Class))objc_msgSend)(center, gs, NSClassFromString(@"AudioSender"));
+    @synchronized([NSObject class]) {
+        audioSender = g_audioSender;
+    }
+    /* 兜底走 ServiceCenter */
+    if (!audioSender) {
+        Class scCls = NSClassFromString(@"MMServiceCenter");
+        if (scCls) {
+            id center = nil;
+            SEL dc = NSSelectorFromString(@"defaultCenter");
+            if ([scCls respondsToSelector:dc]) center = ((id (*)(id, SEL))objc_msgSend)(scCls, dc);
+            if (!center) {
+                SEL si = NSSelectorFromString(@"sharedInstance");
+                if ([scCls respondsToSelector:si]) center = ((id (*)(id, SEL))objc_msgSend)(scCls, si);
+            }
+            if (center) {
+                SEL gs = NSSelectorFromString(@"getService:");
+                if ([center respondsToSelector:gs]) {
+                    audioSender = ((id (*)(id, SEL, Class))objc_msgSend)(center, gs, NSClassFromString(@"AudioSender"));
+                }
             }
         }
     }
-    if (!audioSender) return @"拿不到 AudioSender";
+    if (!audioSender) return @"拿不到 AudioSender（先在聊天里按住说话一次）";
 
     /* 拿 transcacheLogic（每次录音换新实例，从 audioSender 现取） */
-    id logic = [audioSender valueForKey:@"transcacheLogic"];
+    id logic = nil;
+    @try { logic = [audioSender valueForKey:@"transcacheLogic"]; } @catch (NSException *e) { }
     if (!logic) return @"拿不到 transcacheLogic";
+
+    TTLog(@"[send] audioSender=%@ logic=%@", audioSender, logic);
 
     SEL pvd = NSSelectorFromString(@"processVoiceData:");
     SEL pvdq = NSSelectorFromString(@"processVoiceData:queueItem:");
@@ -360,6 +374,8 @@ static NSString *g_voiceName = K_DEFAULT_VOICE;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic) NSInteger voiceIndex;
+- (void)kbWillShow:(NSNotification *)n;
+- (void)kbWillHide:(NSNotification *)n;
 @end
 
 @implementation TTSFloatView
@@ -393,17 +409,47 @@ static NSString *g_voiceName = K_DEFAULT_VOICE;
     }
 }
 
+/* 键盘跟随：面板推到键盘上方，绝不挡发送按钮 */
+- (void)kbWillShow:(NSNotification *)n {
+    CGRect kb = [n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    CGRect f = self.panel.frame;
+    CGFloat maxY = kb.origin.y - 8;
+    if (CGRectGetMaxY(f) > maxY) {
+        f.origin.y = MAX(40, maxY - f.size.height);
+        self.panel.frame = f;
+    }
+}
+
+- (void)kbWillHide:(NSNotification *)n {
+    CGRect f = self.panel.frame;
+    if (f.origin.y < 80) {
+        f.origin.y = 80;
+        self.panel.frame = f;
+    }
+}
+
 - (void)togglePanel {
     if (self.panel) { [self.panel removeFromSuperview]; self.panel = nil; return; }
 
     CGFloat w = 300, h = 250;
     CGRect sc = UIScreen.mainScreen.bounds;
+    /* 面板放屏幕上部（键盘弹出也不会挡住发送按钮） */
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(MAX(10, CGRectGetMidX(sc) - w / 2),
-                                                              MAX(50, CGRectGetMidY(sc) - h / 2), w, h)];
+                                                              80, w, h)];
     panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
     panel.layer.cornerRadius = 18;
     panel.layer.masksToBounds = YES;
     self.panel = panel;
+
+    /* 键盘弹出时再往上让一点（保险） */
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(kbWillShow:)
+                                                 name:UIKeyboardWillShowNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(kbWillHide:)
+                                                 name:UIKeyboardWillHideNotification
+                                               object:nil];
 
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, 180, 28)];
     title.text = @"🔊 文字转语音";
