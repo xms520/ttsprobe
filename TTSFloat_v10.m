@@ -232,7 +232,36 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         id item = nil;
         if (itemCls) {
             item = [[itemCls alloc] init];
-            @try { [item setValue:@1 forKey:@"endflag"]; } @catch (NSException *e) { TTLog(@"[send] endflag kvc err"); }
+            /* endflag KVC 写不进（v10实测）→ 枚举 ivar 找含 end 的字段，object_setIvar 直接写 */
+            BOOL didSet = NO;
+            unsigned int count = 0;
+            Ivar *ivars = class_copyIvarList(itemCls, &count);
+            if (ivars) {
+                for (unsigned int i = 0; i < count; i++) {
+                    const char *n = ivar_getName(ivars[i]);
+                    if (n) {
+                        NSString *name = [NSString stringWithUTF8String:n];
+                        if ([name.lowercaseString containsString:@"end"]) {
+                            const char *t = ivar_getTypeEncoding(ivars[i]);
+                            TTLog(@"[send] end ivar found: %@ type=%s", name, t ? t : "?");
+                            /* 按类型写 1 */
+                            if (t && (strcmp(t, "B") == 0 || strcmp(t, "c") == 0 || strcmp(t, "i") == 0)) {
+                                object_setIvar(item, ivars[i], (__bridge id)(void *)1);
+                                didSet = YES;
+                            } else if (t && (strcmp(t, "q") == 0 || strcmp(t, "l") == 0)) {
+                                object_setIvar(item, ivars[i], @1);
+                                didSet = YES;
+                            } else {
+                                object_setIvar(item, ivars[i], @1);
+                                didSet = YES;
+                            }
+                        }
+                    }
+                }
+                free(ivars);
+            }
+            if (!didSet) TTLog(@"[send] 未找到 end 相关 ivar（count=%u）", count);
+            else TTLog(@"[send] endflag 已通过 ivar 写入");
         }
         void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
         pvdqImp(logic, pvdq, nil, item);
