@@ -72,6 +72,7 @@ static void TTLog(NSString *fmt, ...) {
 /* ==================== 当前聊天对象捕获（v8b 验证） ==================== */
 static NSString *g_lastToUsr = nil;
 static id g_audioSender = nil;   /* prepareSend 的 self 就是 AudioSender 实例，直接存 */
+static id g_lastUserData = nil;  /* prepareSend 的 arg：AudioRecorderUserData（完整对象） */
 
 static void InstallPrepareSendCapture(void) {
     static dispatch_once_t once;
@@ -89,9 +90,10 @@ static void InstallPrepareSendCapture(void) {
             /* B24@0:8@16 — BOOL 返回（真机验证） */
             IMP newImp = imp_implementationWithBlock(^BOOL(id self, id arg) {
                 @try {
-                    /* self 就是 AudioSender 实例 — 存下来供发送链用 */
+                    /* self 就是 AudioSender 实例；arg 是 AudioRecorderUserData — 全存 */
                     @synchronized([NSObject class]) {
                         if (g_audioSender != self) g_audioSender = self;
+                        if (arg && g_lastUserData != arg) g_lastUserData = arg;
                     }
                     if (arg) {
                         id to = [arg valueForKey:@"tousr"];
@@ -233,43 +235,43 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     }
     TTLog(@"[send] ② fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
 
-    /* ③ 结束标记 queueItem:_endFlag=1（arg1=nil，与 v9 观察一致） */
+    /* ③ 结束标记 queueItem:_endFlag=1 */
     @try {
         Class itemCls = NSClassFromString(@"StreamInputQueueItem");
         id item = nil;
         if (itemCls) {
             item = [[itemCls alloc] init];
-            BOOL didSet = NO;
-            unsigned int count = 0;
-            Ivar *ivars = class_copyIvarList(itemCls, &count);
-            if (ivars) {
-                for (unsigned int i = 0; i < count; i++) {
-                    const char *n = ivar_getName(ivars[i]);
-                    if (n) {
-                        NSString *name = [NSString stringWithUTF8String:n];
-                        if ([name.lowercaseString containsString:@"endflag"]) {
-                            const char *t = ivar_getTypeEncoding(ivars[i]);
-                            /* type=I (unsigned int) → 写 NSNumber 会崩，直接用 object_setIvar 传装箱值也不对
-                             * 正确做法：_endFlag 是原始 uint32，object_setIvar 只能放对象。
-                             * 改用 KVC setValue:forKey: 于 _endFlag 名（含下划线也试 endFlag） */
-                            TTLog(@"[send] ③ end ivar: %@ type=%s", name, t ? t : "?");
-                            @try { [item setValue:@1 forKey:@"_endFlag"]; didSet = YES; }
-                            @catch (NSException *e2) {
-                                @try { [item setValue:@1 forKey:@"endFlag"]; didSet = YES; }
-                                @catch (NSException *e3) { TTLog(@"[send] ③ endFlag KVC 均失败"); }
-                            }
-                        }
-                    }
-                }
-                free(ivars);
+            @try { [item setValue:@1 forKey:@"_endFlag"]; }
+            @catch (NSException *e2) {
+                @try { [item setValue:@1 forKey:@"endFlag"]; }
+                @catch (NSException *e3) { TTLog(@"[send] ③ endFlag KVC 失败"); }
             }
-            if (!didSet) TTLog(@"[send] ③ 未写入 endFlag");
         }
         void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
         pvdqImp(logic, pvdq, nil, item);
         TTLog(@"[send] ③ endflag sent");
     } @catch (NSException *e) {
         TTLog(@"[send] ③ 异常: %@", e);
+    }
+
+    /* ④ 触发上传：调 [audioSender prepareSend:userData]（真正的上传开关！）
+     * userData 用 hook 捕获的原对象，更新 duration=音频毫秒数 */
+    @try {
+        id userData = nil;
+        @synchronized([NSObject class]) { userData = g_lastUserData; }
+        if (userData) {
+            NSUInteger ms = total / 32; /* 16kHz mono int16 → 每秒 32000 字节 → ms = bytes/32 */
+            @try { [userData setValue:@(ms) forKey:@"duration"]; } @catch (NSException *e2) { }
+            @try { [userData setValue:toUsr forKey:@"tousr"]; } @catch (NSException *e3) { }
+            SEL ps = NSSelectorFromString(@"prepareSend:");
+            BOOL (*psImp)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
+            BOOL ok = psImp(audioSender, ps, userData);
+            TTLog(@"[send] ④ prepareSend ret=%d duration=%lu", ok, (unsigned long)ms);
+        } else {
+            TTLog(@"[send] ④ 无 userData（先真实录音一次）");
+        }
+    } @catch (NSException *e) {
+        TTLog(@"[send] ④ prepareSend 异常: %@", e);
     }
 
     return nil; /* 成功 */
