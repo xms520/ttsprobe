@@ -193,7 +193,7 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
 
     SEL pvd = NSSelectorFromString(@"processVoiceData:");
     SEL pvdq = NSSelectorFromString(@"processVoiceData:queueItem:");
-    SEL epd = NSSelectorFromString(@"endProcessVoiceData:");
+    SEL epd = NSSelectorFromString(@"endProcessVoiceData");
 
     /* 方法在运行时动态注册（分类/动态addMethod），静态查 Method 查不到。
      * 直接 objc_msgSend 调用，@try/@catch 兜底（v9 探针验证调用必然成功） */
@@ -205,16 +205,26 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     const unsigned char *bytes = pcmData.bytes;
     NSUInteger total = pcmData.length;
     NSUInteger fed = 0, seq = 0;
-    for (NSUInteger off = 0; off < total; off += CHUNK) {
-        NSUInteger len = MIN(CHUNK, total - off);
-        NSData *piece = [NSData dataWithBytes:bytes + off length:len];
-        pvdImp(logic, pvd, piece);
-        fed += len; seq++;
+    @try {
+        for (NSUInteger off = 0; off < total; off += CHUNK) {
+            NSUInteger len = MIN(CHUNK, total - off);
+            NSData *piece = [NSData dataWithBytes:bytes + off length:len];
+            pvdImp(logic, pvd, piece);
+            fed += len; seq++;
+        }
+    } @catch (NSException *e) {
+        TTLog(@"[send] 喂入异常: %@", e);
+        return @"喂入数据异常";
     }
     TTLog(@"[send] fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
 
-    /* ② endProcessVoiceData:(tousr) */
-    epdImp(logic, epd, toUsr);
+    /* ② endProcessVoiceData（真实 selector 无冒号；v9 观察到调用时 x2 传了 tousr，照做） */
+    @try {
+        epdImp(logic, epd, toUsr);
+        TTLog(@"[send] endProcess done");
+    } @catch (NSException *e) {
+        TTLog(@"[send] endProcess 异常: %@", e);
+    }
 
     /* ③ 结束标记 queueItem:nil endflag=1 */
     @try {
