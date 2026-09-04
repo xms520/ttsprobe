@@ -497,26 +497,7 @@ static NSString *g_voiceName = K_DEFAULT_VOICE;
 @end
 
 /* ==================== 启动 ==================== */
-@interface TTSBootstrap : NSObject
-@end
-
-@implementation TTSBootstrap
-+ (void)load {
-    [[NSNotificationCenter defaultCenter] addObserver:[self new]
-                                             selector:@selector(start:)
-                                                 name:UIApplicationDidFinishLaunchingNotification
-                                               object:nil];
-}
-
-- (void)start:(NSNotification *)n {
-    [NSTimer scheduledTimerWithTimeInterval:2
-                                     target:self
-                                   selector:@selector(show:)
-                                   userInfo:nil
-                                    repeats:NO];
-}
-
-- (void)show:(NSTimer *)t {
+static void TTSShowBall(void) {
     if (g_ttsWindow) return;
     CGRect r = UIScreen.mainScreen.bounds;
     g_ttsWindow = [[TTSPassWindow alloc] initWithFrame:r];
@@ -528,16 +509,25 @@ static NSString *g_voiceName = K_DEFAULT_VOICE;
     root.view.backgroundColor = UIColor.clearColor;
     TTSFloatView *ball = [[TTSFloatView alloc] initWithFrame:CGRectMake(r.size.width - 72, r.size.height * .42, 56, 56)];
     [root.view addSubview:ball];
-    [g_ttsWindow makeKeyAndVisible];
+    g_ttsWindow.hidden = NO;
 
-    TTLog(@"===== TTSFloat_v10 loaded =====");
-    TTLog(@"key: %@", TiaxKey().length ? @"已配置" : @"未配置(K_APIKEY_BUILTIN)");
+    TTLog(@"===== ball shown =====");
+    TTLog(@"key: %@", TiaxKey().length ? @"已配置" : @"未配置");
     TTLog(@"MJSilkCodec encodeFromPCMData: %@",
           [NSClassFromString(@"MJSilkCodec") instancesRespondToSelector:NSSelectorFromString(@"encodeFromPCMData:")] ? @"YES" : @"NO");
+}
 
-    /* 提前装好捕获（用户第一次真实录音后 tousr 就有了） */
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ InstallPrepareSendCapture(); });
+@interface TTSBootstrap : NSObject
+@end
+
+@implementation TTSBootstrap
++ (void)load {
+    /* 不依赖任何通知——直接延迟到主线程创建（constructor 时主队列还没跑起来） */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        TTSShowBall();
+        InstallPrepareSendCapture();
+    });
 }
 @end
 
