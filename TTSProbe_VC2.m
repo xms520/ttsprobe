@@ -427,21 +427,35 @@ static void TTSProbeEntry(void)
         kLogPath = [home stringByAppendingPathComponent:@"Documents/TTSProbe.log"];
 
         TP("========================================");
-        TP("TTSProbe loaded");
-        TP("MODE: TrollStore diagnostic");
+        TP("TTSProbe loaded (NO immediate scan)");
+        TP("MODE: TrollStore diagnostic - deferred");
         TP("NO HOOK / NO SWIZZLE / NO SEND / NO MODIFY");
         TP("LOG FILE: %s", kLogPath.UTF8String);
         TP("========================================");
 
-        SearchClasses();
-        ProbeKnownClasses();
-        ProbeCurrentVC();
+        /*
+         * 不在启动时同步扫描（会阻塞主线程导致登录页卡死/闪退）。
+         * 全部改为延迟执行，等你进入聊天界面后再抓。
+         * 关键：SearchClasses(扫10万+类) 已移除，那是卡顿主因。
+         */
 
-        /* 延迟重测：等微信 UI 就绪、用户进入聊天页后再抓 VC（同步版已能抓，这里再补两次） */
-        ProbeCurrentVCDeferred(3);
-        ProbeCurrentVCDeferred(8);
+        /* 延迟探测（秒）：给足时间进聊天页 */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            TP("===== DEFERRED PROBE START (20s) =====");
+            ProbeKnownClasses();
+            ProbeCurrentVC();
+            TP("===== DEFERRED PROBE DONE (20s) =====");
+        });
 
-        TP("===== PROBE INITIAL PASS COMPLETE =====");
-        TP("Enter a chat page, wait ~8s, then check Documents/TTSProbe.log for DEFERRED VC PROBE.");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            TP("===== DEFERRED PROBE START (45s) =====");
+            ProbeCurrentVC();
+            TP("===== DEFERRED PROBE DONE (45s) =====");
+        });
+
+        TP("===== INITIALIZED - waiting for deferred scan (20s/45s) =====");
+        TP("Enter a chat page now; keep the app foreground for ~45s, then read Documents/TTSProbe.log.");
     }
 }
