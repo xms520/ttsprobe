@@ -54,20 +54,40 @@ static void HookPrepareSend(void) {
 
     IMP oldImp = method_getImplementation(m);
 
-    IMP newImp = imp_implementationWithBlock(^id(id self, id arg) {
-        WPLog(@"========== prepareSend BEGIN ==========");
-        LogArg(@"arg1", arg);
+    const char *types = method_getTypeEncoding(m);
+    char retType = types ? types[0] : '@';
+    WPLog(@"[FOUND] AudioSender -prepareSend: type=%s", types ? types : "?");
 
-        id ret = ((id (*)(id, SEL, id))oldImp)(self, sel, arg);
-
-        LogArg(@"return", ret);
-        WPLog(@"========== prepareSend END ==========");
-
-        return ret;
-    });
-
-    method_setImplementation(m, newImp);
-    WPLog(@"[HOOK OK] AudioSender -prepareSend:");
+    if (retType == 'v') {
+        IMP newImp = imp_implementationWithBlock(^(id self, id arg) {
+            WPLog(@"========== prepareSend BEGIN (void) ==========");
+            LogArg(@"arg1", arg);
+            ((void (*)(id, SEL, id))oldImp)(self, sel, arg);
+            WPLog(@"========== prepareSend END ==========");
+        });
+        method_setImplementation(m, newImp);
+    } else if (retType == 'B') {
+        IMP newImp = imp_implementationWithBlock(^BOOL(id self, id arg) {
+            WPLog(@"========== prepareSend BEGIN (BOOL) ==========");
+            LogArg(@"arg1", arg);
+            BOOL r = ((BOOL (*)(id, SEL, id))oldImp)(self, sel, arg);
+            WPLog(@"    return BOOL=%d", r);
+            WPLog(@"========== prepareSend END ==========");
+            return r;
+        });
+        method_setImplementation(m, newImp);
+    } else {
+        IMP newImp = imp_implementationWithBlock(^id(id self, id arg) {
+            WPLog(@"========== prepareSend BEGIN (@) ==========");
+            LogArg(@"arg1", arg);
+            id ret = ((id (*)(id, SEL, id))oldImp)(self, sel, arg);
+            LogArg(@"return", ret);
+            WPLog(@"========== prepareSend END ==========");
+            return ret;
+        });
+        method_setImplementation(m, newImp);
+    }
+    WPLog(@"[HOOK OK] AudioSender -prepareSend: (ret=%c)", retType);
 }
 
 static void HookStopRecord(void) {
@@ -111,21 +131,37 @@ static void HookOneArgMethod(NSString *className, NSString *selectorName) {
     WPLog(@"[FOUND] %@ -%@ type=%s", className, selectorName, types);
 
     IMP oldImp = method_getImplementation(m);
+    char retType = types ? types[0] : '@';
 
-    IMP newImp = imp_implementationWithBlock(^id(id self, id arg) {
-        WPLog(@"---- %@ -%@ BEGIN ----", className, selectorName);
-        LogArg(@"arg1", arg);
-
-        // 不假设返回类型，先按常见 Objective-C 对象返回读取。
-        id ret = ((id (*)(id, SEL, id))oldImp)(self, sel, arg);
-
-        LogArg(@"return", ret);
-        WPLog(@"---- %@ -%@ END ----", className, selectorName);
-        return ret;
-    });
-
-    method_setImplementation(m, newImp);
-    WPLog(@"[HOOK OK] %@ -%@", className, selectorName);
+    if (retType == 'v') {
+        IMP newImp = imp_implementationWithBlock(^(id self, id arg) {
+            WPLog(@"---- %@ -%@ BEGIN (void) ----", className, selectorName);
+            LogArg(@"arg1", arg);
+            ((void (*)(id, SEL, id))oldImp)(self, sel, arg);
+            WPLog(@"---- %@ -%@ END ----", className, selectorName);
+        });
+        method_setImplementation(m, newImp);
+    } else if (retType == 'B') {
+        IMP newImp = imp_implementationWithBlock(^BOOL(id self, id arg) {
+            WPLog(@"---- %@ -%@ BEGIN (BOOL) ----", className, selectorName);
+            LogArg(@"arg1", arg);
+            BOOL r = ((BOOL (*)(id, SEL, id))oldImp)(self, sel, arg);
+            WPLog(@"    return BOOL=%d", r);
+            return r;
+        });
+        method_setImplementation(m, newImp);
+    } else {
+        IMP newImp = imp_implementationWithBlock(^id(id self, id arg) {
+            WPLog(@"---- %@ -%@ BEGIN (@) ----", className, selectorName);
+            LogArg(@"arg1", arg);
+            id ret = ((id (*)(id, SEL, id))oldImp)(self, sel, arg);
+            LogArg(@"return", ret);
+            WPLog(@"---- %@ -%@ END ----", className, selectorName);
+            return ret;
+        });
+        method_setImplementation(m, newImp);
+    }
+    WPLog(@"[HOOK OK] %@ -%@ (ret=%c)", className, selectorName, retType);
 }
 
 static void HookTwoArgMethod(NSString *className, NSString *selectorName) {

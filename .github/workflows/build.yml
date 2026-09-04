@@ -64,6 +64,15 @@ jobs:
             -o TTSProbe_v5.dylib \
             TTSProbe_v5.m
 
+      - name: Build TTSProbe v7 dylib (no-hook safe probe)
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 \
+            -dynamiclib \
+            -framework Foundation -framework UIKit \
+            -o TTSProbe_v7.dylib \
+            TTSProbe_v7.m
+
       - name: Sign with ldid (fake sign)
         run: |
           ldid -S TTSProbe.dylib || true
@@ -71,11 +80,12 @@ jobs:
           ldid -S TTSFloat.dylib || true
           ldid -S TTSFloat_v4.dylib || true
           ldid -S TTSProbe_v5.dylib || true
+          ldid -S TTSProbe_v7.dylib || true
 
       - name: Show result
         run: |
-          ls -la TTSProbe.dylib TTSProbe_VC2.dylib TTSFloat.dylib TTSFloat_v4.dylib TTSProbe_v5.dylib
-          file TTSProbe.dylib TTSProbe_VC2.dylib TTSFloat.dylib TTSFloat_v4.dylib TTSProbe_v5.dylib
+          ls -la *.dylib
+          file *.dylib
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -87,6 +97,7 @@ jobs:
             TTSFloat.dylib
             TTSFloat_v4.dylib
             TTSProbe_v5.dylib
+            TTSProbe_v7.dylib
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
