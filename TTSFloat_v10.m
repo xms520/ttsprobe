@@ -246,6 +246,19 @@ static NSString *TTSEncode(NSString *s) {
     return [s stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
 }
 
+/* 检测数据是否是音频（mp3/wav 头），排除 CDN 404 返回的 JSON 错误文本 */
+static BOOL TTSIsAudioData(NSData *d) {
+    if (d.length < 4) return NO;
+    const unsigned char *b = d.bytes;
+    /* ID3 (mp3 tag) / RIFF (wav) / 0xFF 0xFx (mp3 frame) / ftyp (m4a) */
+    if (b[0] == 'I' && b[1] == 'D' && b[2] == '3') return YES;
+    if (b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F') return YES;
+    if (b[0] == 0xFF && (b[1] & 0xF0) == 0xF0) return YES;
+    if (b[0] == 'f' && b[1] == 't' && b[2] == 'y' && b[3] == 'p') return YES;
+    if (b[0] == '{') return NO; /* JSON 错误文本 */
+    return NO;
+}
+
 static void TTSDownloadAudio(NSString *audioURL, void (^done)(NSData *audio, NSError *error)) {
     NSURL *u = [NSURL URLWithString:audioURL];
     if (!u) {
@@ -254,8 +267,16 @@ static void TTSDownloadAudio(NSString *audioURL, void (^done)(NSData *audio, NSE
     }
     NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithURL:u
         completionHandler:^(NSData *audio, NSURLResponse *r2, NSError *e2) {
-            if (e2 != nil || audio.length == 0) {
+            if (e2 != nil) {
                 done(nil, e2);
+            } else if (audio.length == 0) {
+                done(nil, [NSError errorWithDomain:@"TTS" code:3 userInfo:@{NSLocalizedDescriptionKey:@"音频下载为空"}]);
+            } else if (!TTSIsAudioData(audio)) {
+                /* CDN 404 会返回 JSON 错误文本（NoSuchKey）——视为下载失败 */
+                NSString *body = [[NSString alloc] initWithData:[audio subdataWithRange:NSMakeRange(0, MIN(80, audio.length))]
+                                                        encoding:NSUTF8StringEncoding];
+                TTLog(@"[tts] CDN 无音频: %@", body);
+                done(nil, [NSError errorWithDomain:@"TTS" code:7 userInfo:@{NSLocalizedDescriptionKey:@"CDN文件已过期(NoSuchKey)"}]);
             } else {
                 TTLog(@"[tts] mp3 %lu bytes", (unsigned long)audio.length);
                 done(audio, nil);
@@ -264,7 +285,7 @@ static void TTSDownloadAudio(NSString *audioURL, void (^done)(NSData *audio, NSE
     [task resume];
 }
 
-static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
+static void RequestTTSOnce(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
     NSString *v = voice ? voice : K_DEFAULT_VOICE;
     NSString *k = TiaxKey();
     if (k.length == 0) {
@@ -300,6 +321,27 @@ static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *aud
             done(nil, [NSError errorWithDomain:@"TTS" code:5 userInfo:@{NSLocalizedDescriptionKey:@"非JSON返回"}]);
         }];
     [task resume];
+}
+
+/* 带重试的 TTS 请求：CDN 文件过期(NoSuchKey)时重试——第一次请求触发后端重新合成 */
+static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
+    __block NSInteger attempt = 0;
+    __block void (^retry)(NSData *, NSError *) = nil;
+    retry = ^(NSData *audio, NSError *error) {
+        attempt++;
+        if (audio != nil) { done(audio, nil); return; }
+        BOOL isCDNExpired = (error.code == 7);
+        if (isCDNExpired && attempt < 3) {
+            TTLog(@"[tts] 第%ld次失败(CDN过期)，重试…", (long)attempt);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                           dispatch_get_global_queue(0, 0), ^{
+                RequestTTSOnce(text, voice, retry);
+            });
+            return;
+        }
+        done(nil, error);
+    };
+    RequestTTSOnce(text, voice, retry);
 }
 
 /* ==================== mp3 → 16kHz mono Int16 PCM ==================== */
