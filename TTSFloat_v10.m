@@ -201,8 +201,8 @@ static NSString *TTSEncode(NSString *s) {
 }
 
 static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
-    NSString *v = voice ?: K_DEFAULT_VOICE;
-    NSString *k = TiaxKey() ?: @"";
+    NSString *v = voice ? voice : K_DEFAULT_VOICE;
+    NSString *k = TiaxKey();
     NSString *urlStr = [NSString stringWithFormat:@"%@?text=%@&voice=%@&apikey=%@",
                         K_TTS_ENDPOINT, TTSEncode(text), TTSEncode(v), TTSEncode(k)];
     NSURL *url = [NSURL URLWithString:urlStr];
