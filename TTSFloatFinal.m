@@ -68,6 +68,8 @@ static void LOG(NSString *fmt, ...) {
 /* ============================================================
  * 当前聊天用户名获取（真机验证字段）
  * ============================================================ */
+static UIWindow *g_ttsWindow = nil;
+
 static NSString *CurrentChatUser(void) {
     @autoreleasepool {
         Class chatCls = NSClassFromString(@"BaseMsgContentViewController");
@@ -313,7 +315,6 @@ static NSData *RequestTTS(NSString *text) {
 /* ============================================================
  * 悬浮窗 UI
  * ============================================================ */
-static UIWindow *g_ttsWindow = nil;
 
 @interface TTSPassWindow : UIWindow @end
 @implementation TTSPassWindow
