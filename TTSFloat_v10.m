@@ -189,18 +189,21 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     @try { logic = [audioSender valueForKey:@"transcacheLogic"]; } @catch (NSException *e) { }
     if (!logic) return @"拿不到 transcacheLogic";
 
-    TTLog(@"[send] audioSender=%@ logic=%@", audioSender, logic);
+    TTLog(@"[send] audioSender=%@ logic=%@ class=%@", audioSender, logic, NSStringFromClass([logic class]));
 
     SEL pvd = NSSelectorFromString(@"processVoiceData:");
     SEL pvdq = NSSelectorFromString(@"processVoiceData:queueItem:");
     SEL epd = NSSelectorFromString(@"endProcessVoiceData:");
 
-    if (![logic respondsToSelector:pvd] || ![logic respondsToSelector:epd]) {
-        return @"transcacheLogic 缺方法";
-    }
+    /* 直接从类上取 Method（respondsToSelector 对分类方法可能误报缺方法，v9 探针已验证方法存在） */
+    Class logicCls = [logic class];
+    Method mPvd = class_getInstanceMethod(logicCls, pvd);
+    Method mEpd = class_getInstanceMethod(logicCls, epd);
+    if (!mPvd) return @"processVoiceData: 方法不存在";
+    if (!mEpd) return @"endProcessVoiceData: 方法不存在";
 
-    void (*pvdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
-    void (*epdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
+    void (*pvdImp)(id, SEL, id) = (void (*)(id, SEL, id))method_getImplementation(mPvd);
+    void (*epdImp)(id, SEL, id) = (void (*)(id, SEL, id))method_getImplementation(mEpd);
 
     /* ① 分片喂 PCM（~8000 字节/片 ≈ 250ms，与微信录音节奏一致） */
     const NSUInteger CHUNK = 8000;
@@ -219,19 +222,22 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     epdImp(logic, epd, toUsr);
 
     /* ③ 结束标记 queueItem:nil endflag=1 */
-    if ([logic respondsToSelector:pvdq]) {
+    Method mPvdq = class_getInstanceMethod(logicCls, pvdq);
+    if (mPvdq) {
         Class itemCls = NSClassFromString(@"StreamInputQueueItem");
         if (itemCls) {
             id item = [[itemCls alloc] init];
             @try { [item setValue:@1 forKey:@"endflag"]; } @catch (NSException *e) { TTLog(@"[send] endflag kvc err"); }
-            void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+            void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))method_getImplementation(mPvdq);
             pvdqImp(logic, pvdq, nil, item);
             TTLog(@"[send] endflag=1 sent");
         } else {
             TTLog(@"[send] StreamInputQueueItem MISS — 尝试 nil 队列项");
-            void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+            void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))method_getImplementation(mPvdq);
             pvdqImp(logic, pvdq, nil, nil);
         }
+    } else {
+        TTLog(@"[send] processVoiceData:queueItem: 不存在 — 跳过结束标记");
     }
 
     return nil; /* 成功 */
