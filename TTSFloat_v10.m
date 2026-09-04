@@ -202,10 +202,11 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     void (*pvdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
     void (*epdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
 
-    /* ===== 真机验证的最终发送顺序 =====
-     * v8b: 松手时 prepareSend:(userData) 先触发（上传启动）
-     * v9:  之后 processVoiceData:(数据帧) + queueItem:nil,endflag=1（数据后到）
-     * 所以正确顺序：prepareSend → endProcess → 喂数据 → endflag
+    /* ===== 终极顺序（基于 v8b 的 logic 替换发现） =====
+     * v8b 铁证: 每次录音/上传周期 transcacheLogic 都换新实例
+     *  - 先喂后 prepareSend → 数据留在旧实例，新实例空 → 卡
+     *  - 先 prepareSend 后喂旧 logic → 旧实例已废弃 → 卡
+     * 正确: prepareSend → 【重新读 logic(新实例)】→ endProcess → 喂数据 → endflag
      */
     const NSUInteger CHUNK = 8000;
     const unsigned char *bytes = pcmData.bytes;
@@ -230,12 +231,26 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         TTLog(@"[send] ① prepareSend 异常: %@", e);
     }
 
-    /* ② endProcessVoiceData */
+    /* ② prepareSend 后重新读 transcacheLogic（关键！上传消费的是新实例） */
+    id logicNew = nil;
+    @try { logicNew = [audioSender valueForKey:@"transcacheLogic"]; } @catch (NSException *e) { }
+    if (logicNew && logicNew != logic) {
+        TTLog(@"[send] ② logic 已替换 %@ -> %@（用新实例喂）", logic, logicNew);
+        logic = logicNew;
+        /* 新实例上重新绑定方法 */
+        pvd = NSSelectorFromString(@"processVoiceData:");
+        pvdq = NSSelectorFromString(@"processVoiceData:queueItem:");
+        epd = NSSelectorFromString(@"endProcessVoiceData");
+    } else {
+        TTLog(@"[send] ② logic 未变，继续用 %@", logic);
+    }
+
+    /* ③ endProcessVoiceData */
     @try {
         epdImp(logic, epd, toUsr);
-        TTLog(@"[send] ② endProcess done");
+        TTLog(@"[send] ③ endProcess done");
     } @catch (NSException *e) {
-        TTLog(@"[send] ② endProcess 异常: %@", e);
+        TTLog(@"[send] ③ endProcess 异常: %@", e);
     }
 
     /* ③ 喂所有 PCM 分片 */
@@ -251,7 +266,7 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         TTLog(@"[send] ③ 喂入异常: %@", e);
         return @"喂入数据异常";
     }
-    TTLog(@"[send] ③ fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
+    TTLog(@"[send] ④ fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
 
     /* ④ 结束标记 queueItem:_endFlag=1 */
     @try {
@@ -262,14 +277,14 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
             @try { [item setValue:@1 forKey:@"_endFlag"]; }
             @catch (NSException *e2) {
                 @try { [item setValue:@1 forKey:@"endFlag"]; }
-                @catch (NSException *e3) { TTLog(@"[send] ④ endFlag KVC 失败"); }
+                @catch (NSException *e3) { TTLog(@"[send] ⑤ endFlag KVC 失败"); }
             }
         }
         void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
         pvdqImp(logic, pvdq, nil, item);
-        TTLog(@"[send] ④ endflag sent");
+        TTLog(@"[send] ⑤ endflag sent");
     } @catch (NSException *e) {
-        TTLog(@"[send] ④ 异常: %@", e);
+        TTLog(@"[send] ⑤ 异常: %@", e);
     }
 
     return nil; /* 成功 */
