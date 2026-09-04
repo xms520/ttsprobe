@@ -147,20 +147,43 @@ static void HookTwoArgMethod(NSString *className, NSString *selectorName) {
 
     IMP oldImp = method_getImplementation(m);
 
-    IMP newImp = imp_implementationWithBlock(^id(id self, id a, id b) {
-        WPLog(@"---- %@ -%@ BEGIN ----", className, selectorName);
-        LogArg(@"arg1", a);
-        LogArg(@"arg2", b);
+    /* 关键修复：按真实返回类型分派，避免 BOOL/void 被误当 id 导致寄存器错位闪退。
+     * types 第一个字符：'v'=void, 'B'=BOOL, '@'=对象, 其他按 void* 兼容处理 */
+    char retType = types ? types[0] : '@';
 
-        id ret = ((id (*)(id, SEL, id, id))oldImp)(self, sel, a, b);
-
-        LogArg(@"return", ret);
-        WPLog(@"---- %@ -%@ END ----", className, selectorName);
-        return ret;
-    });
-
-    method_setImplementation(m, newImp);
-    WPLog(@"[HOOK OK] %@ -%@", className, selectorName);
+    if (retType == 'v') {
+        /* void 返回 */
+        IMP newImp = imp_implementationWithBlock(^(id self, id a, id b) {
+            WPLog(@"---- %@ -%@ BEGIN (void) ----", className, selectorName);
+            LogArg(@"arg1", a); LogArg(@"arg2", b);
+            ((void (*)(id, SEL, id, id))oldImp)(self, sel, a, b);
+            WPLog(@"---- %@ -%@ END ----", className, selectorName);
+        });
+        method_setImplementation(m, newImp);
+    } else if (retType == 'B') {
+        /* BOOL 返回 */
+        IMP newImp = imp_implementationWithBlock(^BOOL(id self, id a, id b) {
+            WPLog(@"---- %@ -%@ BEGIN (BOOL) ----", className, selectorName);
+            LogArg(@"arg1", a); LogArg(@"arg2", b);
+            BOOL r = ((BOOL (*)(id, SEL, id, id))oldImp)(self, sel, a, b);
+            WPLog(@"    return BOOL=%d", r);
+            WPLog(@"---- %@ -%@ END ----", className, selectorName);
+            return r;
+        });
+        method_setImplementation(m, newImp);
+    } else {
+        /* 对象/其他：按 void* 兼容 */
+        IMP newImp = imp_implementationWithBlock(^id(id self, id a, id b) {
+            WPLog(@"---- %@ -%@ BEGIN (@) ----", className, selectorName);
+            LogArg(@"arg1", a); LogArg(@"arg2", b);
+            id r = ((id (*)(id, SEL, id, id))oldImp)(self, sel, a, b);
+            LogArg(@"return", r);
+            WPLog(@"---- %@ -%@ END ----", className, selectorName);
+            return r;
+        });
+        method_setImplementation(m, newImp);
+    }
+    WPLog(@"[HOOK OK] %@ -%@ (ret=%c)", className, selectorName, retType);
 }
 
 static void HookThreeArgMethod(NSString *className, NSString *selectorName) {
@@ -181,22 +204,36 @@ static void HookThreeArgMethod(NSString *className, NSString *selectorName) {
     WPLog(@"[FOUND] %@ -%@ type=%s", className, selectorName, types);
 
     IMP oldImp = method_getImplementation(m);
+    char retType = types ? types[0] : '@';
 
-    IMP newImp = imp_implementationWithBlock(^id(id self, id a, id b, id c) {
-        WPLog(@"---- %@ -%@ BEGIN ----", className, selectorName);
-        LogArg(@"arg1", a);
-        LogArg(@"arg2", b);
-        LogArg(@"arg3", c);
-
-        id ret = ((id (*)(id, SEL, id, id, id))oldImp)(self, sel, a, b, c);
-
-        LogArg(@"return", ret);
-        WPLog(@"---- %@ -%@ END ----", className, selectorName);
-        return ret;
-    });
-
-    method_setImplementation(m, newImp);
-    WPLog(@"[HOOK OK] %@ -%@", className, selectorName);
+    if (retType == 'v') {
+        IMP newImp = imp_implementationWithBlock(^(id self, id a, id b, id c) {
+            WPLog(@"---- %@ -%@ BEGIN (void) ----", className, selectorName);
+            LogArg(@"arg1", a); LogArg(@"arg2", b); LogArg(@"arg3", c);
+            ((void (*)(id, SEL, id, id, id))oldImp)(self, sel, a, b, c);
+            WPLog(@"---- %@ -%@ END ----", className, selectorName);
+        });
+        method_setImplementation(m, newImp);
+    } else if (retType == 'B') {
+        IMP newImp = imp_implementationWithBlock(^BOOL(id self, id a, id b, id c) {
+            WPLog(@"---- %@ -%@ BEGIN (BOOL) ----", className, selectorName);
+            LogArg(@"arg1", a); LogArg(@"arg2", b); LogArg(@"arg3", c);
+            BOOL r = ((BOOL (*)(id, SEL, id, id, id))oldImp)(self, sel, a, b, c);
+            WPLog(@"    return BOOL=%d", r);
+            return r;
+        });
+        method_setImplementation(m, newImp);
+    } else {
+        IMP newImp = imp_implementationWithBlock(^id(id self, id a, id b, id c) {
+            WPLog(@"---- %@ -%@ BEGIN (@) ----", className, selectorName);
+            LogArg(@"arg1", a); LogArg(@"arg2", b); LogArg(@"arg3", c);
+            id r = ((id (*)(id, SEL, id, id, id))oldImp)(self, sel, a, b, c);
+            LogArg(@"return", r);
+            return r;
+        });
+        method_setImplementation(m, newImp);
+    }
+    WPLog(@"[HOOK OK] %@ -%@ (ret=%c)", className, selectorName, retType);
 }
 
 __attribute__((constructor))
