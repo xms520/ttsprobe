@@ -28,20 +28,32 @@ jobs:
             -o TTSProbe.dylib \
             TTSProbe.m
 
+      - name: Build VC2 dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 \
+            -dynamiclib \
+            -framework Foundation -framework UIKit \
+            -o TTSProbe_VC2.dylib \
+            TTSProbe_VC2.m
+
       - name: Sign with ldid (fake sign)
         run: |
           ldid -S TTSProbe.dylib || true
+          ldid -S TTSProbe_VC2.dylib || true
 
       - name: Show result
         run: |
-          ls -la TTSProbe.dylib
-          file TTSProbe.dylib
+          ls -la TTSProbe.dylib TTSProbe_VC2.dylib
+          file TTSProbe.dylib TTSProbe_VC2.dylib
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TTSProbe-dylib
-          path: TTSProbe.dylib
+          name: TTSProbe-dylibs
+          path: |
+            TTSProbe.dylib
+            TTSProbe_VC2.dylib
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
