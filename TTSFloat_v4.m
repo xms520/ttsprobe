@@ -69,6 +69,18 @@ static NSString *Stringify(id obj) {
     }
 }
 
+/* v4 补上缺失的 URLEncode / TiaxKey（v3 有，v4 引用但漏定义） */
+static NSString *URLEncode(NSString *s) {
+    NSCharacterSet *allowed = [NSCharacterSet URLQueryAllowedCharacterSet];
+    return [s stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+}
+
+static NSString *TiaxKey(void) {
+    const char *e = getenv("TIAX_API_KEY");
+    if (e && e[0]) return [NSString stringWithUTF8String:e];
+    return K_APIKEY_BUILTIN;
+}
+
 /* -------------------- 音色 -------------------- */
 
 static NSArray *VoiceList(void) {
@@ -392,11 +404,8 @@ static NSData *DecodeToPCM(NSData *audioData, NSError **outError) {
      *   interleaved
      */
     AVAudioFormat *dst =
-        [[AVAudioFormat alloc]
-         initCommonFormat:AVAudioPCMFormatInt16
-         sampleRate:16000
-         channels:1
-         interleaved:YES];
+        [[AVAudioFormat alloc] initStandardFormatWithSampleRate:16000
+                                                        channels:1];
 
     AVAudioConverter *converter =
         [[AVAudioConverter alloc] initFromFormat:src toFormat:dst];
