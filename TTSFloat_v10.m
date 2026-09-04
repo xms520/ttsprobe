@@ -202,25 +202,43 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     void (*pvdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
     void (*epdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
 
-    /* ===== v9 真机验证的精确发送顺序 =====
-     * 松手时微信真实调用序列：
-     *   ① endProcessVoiceData（x2 传 tousr）
-     *   ② processVoiceData:(最后一帧 PCM)
-     *   ③ processVoiceData:queueItem:(nil, {_endFlag:1})  ← arg1 为 nil
+    /* ===== 真机验证的最终发送顺序 =====
+     * v8b: 松手时 prepareSend:(userData) 先触发（上传启动）
+     * v9:  之后 processVoiceData:(数据帧) + queueItem:nil,endflag=1（数据后到）
+     * 所以正确顺序：prepareSend → endProcess → 喂数据 → endflag
      */
     const NSUInteger CHUNK = 8000;
     const unsigned char *bytes = pcmData.bytes;
     NSUInteger total = pcmData.length;
 
-    /* ① 先 endProcessVoiceData */
+    /* ① prepareSend（上传触发器，最先调） */
     @try {
-        epdImp(logic, epd, toUsr);
-        TTLog(@"[send] ① endProcess done");
+        id userData = nil;
+        @synchronized([NSObject class]) { userData = g_lastUserData; }
+        if (userData) {
+            NSUInteger ms = total / 32; /* 16kHz mono int16 → bytes/32 = 毫秒 */
+            @try { [userData setValue:@(ms) forKey:@"duration"]; } @catch (NSException *e2) { }
+            @try { [userData setValue:toUsr forKey:@"tousr"]; } @catch (NSException *e3) { }
+            SEL ps = NSSelectorFromString(@"prepareSend:");
+            BOOL (*psImp)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
+            BOOL ok = psImp(audioSender, ps, userData);
+            TTLog(@"[send] ① prepareSend ret=%d duration=%lu", ok, (unsigned long)ms);
+        } else {
+            TTLog(@"[send] ① 无 userData");
+        }
     } @catch (NSException *e) {
-        TTLog(@"[send] ① endProcess 异常: %@", e);
+        TTLog(@"[send] ① prepareSend 异常: %@", e);
     }
 
-    /* ② 再喂所有 PCM 分片（最后帧在 endProcess 之后） */
+    /* ② endProcessVoiceData */
+    @try {
+        epdImp(logic, epd, toUsr);
+        TTLog(@"[send] ② endProcess done");
+    } @catch (NSException *e) {
+        TTLog(@"[send] ② endProcess 异常: %@", e);
+    }
+
+    /* ③ 喂所有 PCM 分片 */
     NSUInteger fed = 0, seq = 0;
     @try {
         for (NSUInteger off = 0; off < total; off += CHUNK) {
@@ -230,12 +248,12 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
             fed += len; seq++;
         }
     } @catch (NSException *e) {
-        TTLog(@"[send] ② 喂入异常: %@", e);
+        TTLog(@"[send] ③ 喂入异常: %@", e);
         return @"喂入数据异常";
     }
-    TTLog(@"[send] ② fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
+    TTLog(@"[send] ③ fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
 
-    /* ③ 结束标记 queueItem:_endFlag=1 */
+    /* ④ 结束标记 queueItem:_endFlag=1 */
     @try {
         Class itemCls = NSClassFromString(@"StreamInputQueueItem");
         id item = nil;
@@ -244,34 +262,14 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
             @try { [item setValue:@1 forKey:@"_endFlag"]; }
             @catch (NSException *e2) {
                 @try { [item setValue:@1 forKey:@"endFlag"]; }
-                @catch (NSException *e3) { TTLog(@"[send] ③ endFlag KVC 失败"); }
+                @catch (NSException *e3) { TTLog(@"[send] ④ endFlag KVC 失败"); }
             }
         }
         void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
         pvdqImp(logic, pvdq, nil, item);
-        TTLog(@"[send] ③ endflag sent");
+        TTLog(@"[send] ④ endflag sent");
     } @catch (NSException *e) {
-        TTLog(@"[send] ③ 异常: %@", e);
-    }
-
-    /* ④ 触发上传：调 [audioSender prepareSend:userData]（真正的上传开关！）
-     * userData 用 hook 捕获的原对象，更新 duration=音频毫秒数 */
-    @try {
-        id userData = nil;
-        @synchronized([NSObject class]) { userData = g_lastUserData; }
-        if (userData) {
-            NSUInteger ms = total / 32; /* 16kHz mono int16 → 每秒 32000 字节 → ms = bytes/32 */
-            @try { [userData setValue:@(ms) forKey:@"duration"]; } @catch (NSException *e2) { }
-            @try { [userData setValue:toUsr forKey:@"tousr"]; } @catch (NSException *e3) { }
-            SEL ps = NSSelectorFromString(@"prepareSend:");
-            BOOL (*psImp)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
-            BOOL ok = psImp(audioSender, ps, userData);
-            TTLog(@"[send] ④ prepareSend ret=%d duration=%lu", ok, (unsigned long)ms);
-        } else {
-            TTLog(@"[send] ④ 无 userData（先真实录音一次）");
-        }
-    } @catch (NSException *e) {
-        TTLog(@"[send] ④ prepareSend 异常: %@", e);
+        TTLog(@"[send] ④ 异常: %@", e);
     }
 
     return nil; /* 成功 */
