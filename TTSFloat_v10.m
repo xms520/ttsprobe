@@ -200,38 +200,60 @@ static NSString *TTSEncode(NSString *s) {
     return [s stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
 }
 
+static void TTSDownloadAudio(NSString *audioURL, void (^done)(NSData *audio, NSError *error)) {
+    NSURL *u = [NSURL URLWithString:audioURL];
+    if (!u) {
+        done(nil, [NSError errorWithDomain:@"TTS" code:3 userInfo:@{NSLocalizedDescriptionKey:@"音频URL无效"}]);
+        return;
+    }
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithURL:u
+        completionHandler:^(NSData *audio, NSURLResponse *r2, NSError *e2) {
+            if (e2 != nil || audio.length == 0) {
+                done(nil, e2);
+            } else {
+                TTLog(@"[tts] mp3 %lu bytes", (unsigned long)audio.length);
+                done(audio, nil);
+            }
+        }];
+    [task resume];
+}
+
 static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
     NSString *v = voice ? voice : K_DEFAULT_VOICE;
     NSString *k = TiaxKey();
+    if (k.length == 0) {
+        done(nil, [NSError errorWithDomain:@"TTS" code:6 userInfo:@{NSLocalizedDescriptionKey:@"API key未配置(K_APIKEY_BUILTIN)"}]);
+        return;
+    }
     NSString *urlStr = [NSString stringWithFormat:@"%@?text=%@&voice=%@&apikey=%@",
                         K_TTS_ENDPOINT, TTSEncode(text), TTSEncode(v), TTSEncode(k)];
     NSURL *url = [NSURL URLWithString:urlStr];
-    if (!url) { done(nil, [NSError errorWithDomain:@"TTS" code:1 userInfo:@{NSLocalizedDescriptionKey:@"URL无效"}]); return; }
-
+    if (!url) {
+        done(nil, [NSError errorWithDomain:@"TTS" code:1 userInfo:@{NSLocalizedDescriptionKey:@"URL无效"}]);
+        return;
+    }
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.timeoutInterval = 30;
-    [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
-        if (e) { done(nil, e); return; }
-        if (!data.length) { done(nil, [NSError errorWithDomain:@"TTS" code:2 userInfo:@{NSLocalizedDescriptionKey:@"API空返回"}]); return; }
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if ([json isKindOfClass:[NSDictionary class]]) {
-            NSString *aurl = json[@"url"];
-            if ([aurl isKindOfClass:[NSString class]] && aurl.length) {
-                [[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:aurl] completionHandler:^(NSData *audio, NSURLResponse *r2, NSError *e2) {
-                    if (e2 || !audio.length) {
-                        done(nil, e2);
-                    } else {
-                        TTLog(@"[tts] mp3 %lu bytes", (unsigned long)audio.length);
-                        done(audio, nil);
-                    }
-                }] resume];
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+            if (e != nil) { done(nil, e); return; }
+            if (data.length == 0) {
+                done(nil, [NSError errorWithDomain:@"TTS" code:2 userInfo:@{NSLocalizedDescriptionKey:@"API空返回"}]);
                 return;
             }
-            done(nil, [NSError errorWithDomain:@"TTS" code:4 userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"API无url: %@", json]}]);
-            return;
-        }
-        done(nil, [NSError errorWithDomain:@"TTS" code:5 userInfo:@{NSLocalizedDescriptionKey:@"非JSON返回"}]);
-    }] resume];
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([json isKindOfClass:[NSDictionary class]]) {
+                NSString *aurl = json[@"url"];
+                if ([aurl isKindOfClass:[NSString class]] && aurl.length > 0) {
+                    TTSDownloadAudio(aurl, done);
+                    return;
+                }
+                done(nil, [NSError errorWithDomain:@"TTS" code:4 userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"API无url: %@", json]}]);
+                return;
+            }
+            done(nil, [NSError errorWithDomain:@"TTS" code:5 userInfo:@{NSLocalizedDescriptionKey:@"非JSON返回"}]);
+        }];
+    [task resume];
 }
 
 /* ==================== mp3 → 16kHz mono Int16 PCM ==================== */
