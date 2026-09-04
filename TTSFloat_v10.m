@@ -34,7 +34,7 @@
 #define K_DEFAULT_VOICE @"2学长"
 
 /* API key 在这里填（环境变量在 TrollStore 注入下读不到） */
-#define K_APIKEY_BUILTIN @""
+#define K_APIKEY_BUILTIN @"86306ba1cf8d50b2866c8369a14b384fe1ff96900ca822d98bd35274e87b0635"
 
 static NSArray *VoiceList(void) {
     return @[
