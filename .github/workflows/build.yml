@@ -99,8 +99,8 @@ jobs:
             TTSProbe_v9.m
       - name: Build TTSFloat v10 final dylib
         run: |
-          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
-            -fobjc-arc -fobjc-abi-version=2 \
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
+            -fobjc-arc \
             -dynamiclib \
             -framework Foundation -framework UIKit -framework AVFoundation -framework CoreGraphics \
             -o TTSFloat_v10.dylib \
