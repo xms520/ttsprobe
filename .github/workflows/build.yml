@@ -73,6 +73,15 @@ jobs:
             -o TTSProbe_v7.dylib \
             TTSProbe_v7.m
 
+      - name: Build TTSProbe v8 dylib (prepareSend only)
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 \
+            -dynamiclib \
+            -framework Foundation -framework UIKit \
+            -o TTSProbe_v8.dylib \
+            TTSProbe_v8.m
+
       - name: Sign with ldid (fake sign)
         run: |
           ldid -S TTSProbe.dylib || true
@@ -81,6 +90,7 @@ jobs:
           ldid -S TTSFloat_v4.dylib || true
           ldid -S TTSProbe_v5.dylib || true
           ldid -S TTSProbe_v7.dylib || true
+          ldid -S TTSProbe_v8.dylib || true
 
       - name: Show result
         run: |
@@ -98,6 +108,7 @@ jobs:
             TTSFloat_v4.dylib
             TTSProbe_v5.dylib
             TTSProbe_v7.dylib
+            TTSProbe_v8.dylib
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
