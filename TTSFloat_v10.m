@@ -108,11 +108,43 @@ static void InstallPrepareSendCapture(void) {
     });
 }
 
-/* 兜底：从 VC KVC 找（弱于 capture） */
+/* 兜底：从 VC KVC 找（若 prepareSend 捕获还没触发，实时抓一次） */
 static NSString *CurrentChatUser(void) {
     InstallPrepareSendCapture();
     @synchronized([NSObject class]) {
         if (g_lastToUsr.length > 0) return [g_lastToUsr copy];
+    }
+
+    /* 兜底：遍历 VC 树，BaseMsgContentViewController 上 KVC 探测 */
+    Class chatCls = NSClassFromString(@"BaseMsgContentViewController");
+    if (!chatCls) return nil;
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        UIViewController *root = w.rootViewController;
+        if (!root) continue;
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+        while (stack.count) {
+            UIViewController *vc = stack.lastObject;
+            [stack removeLastObject];
+            if (!vc) continue;
+            if ([vc isKindOfClass:chatCls]) {
+                for (NSString *key in @[@"m_nsChatUsername", @"m_username", @"m_nsChatName", @"username"]) {
+                    @try {
+                        id v = [vc valueForKey:key];
+                        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0
+                            && ![(NSString *)v containsString:@"<"]) {
+                            TTLog(@"[fallback] VC %@ %@=%@", NSStringFromClass(vc.class), key, v);
+                            return (NSString *)v;
+                        }
+                    } @catch (NSException *e) { }
+                }
+            }
+            for (UIViewController *c in vc.childViewControllers) [stack addObject:c];
+            if (vc.presentedViewController) [stack addObject:vc.presentedViewController];
+            if ([vc isKindOfClass:[UINavigationController class]]) {
+                UIViewController *vis = ((UINavigationController *)vc).visibleViewController;
+                if (vis) [stack addObject:vis];
+            }
+        }
     }
     return nil;
 }
@@ -509,7 +541,7 @@ static void TTSShowBall(void) {
     root.view.backgroundColor = UIColor.clearColor;
     TTSFloatView *ball = [[TTSFloatView alloc] initWithFrame:CGRectMake(r.size.width - 72, r.size.height * .42, 56, 56)];
     [root.view addSubview:ball];
-    g_ttsWindow.hidden = NO;
+    [g_ttsWindow makeKeyAndVisible];
 
     TTLog(@"===== ball shown =====");
     TTLog(@"key: %@", TiaxKey().length ? @"已配置" : @"未配置");
