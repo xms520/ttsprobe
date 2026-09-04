@@ -200,10 +200,25 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     void (*pvdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
     void (*epdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
 
-    /* ① 分片喂 PCM（~8000 字节/片 ≈ 250ms，与微信录音节奏一致） */
+    /* ===== v9 真机验证的精确发送顺序 =====
+     * 松手时微信真实调用序列：
+     *   ① endProcessVoiceData（x2 传 tousr）
+     *   ② processVoiceData:(最后一帧 PCM)
+     *   ③ processVoiceData:queueItem:(nil, {_endFlag:1})  ← arg1 为 nil
+     */
     const NSUInteger CHUNK = 8000;
     const unsigned char *bytes = pcmData.bytes;
     NSUInteger total = pcmData.length;
+
+    /* ① 先 endProcessVoiceData */
+    @try {
+        epdImp(logic, epd, toUsr);
+        TTLog(@"[send] ① endProcess done");
+    } @catch (NSException *e) {
+        TTLog(@"[send] ① endProcess 异常: %@", e);
+    }
+
+    /* ② 再喂所有 PCM 分片（最后帧在 endProcess 之后） */
     NSUInteger fed = 0, seq = 0;
     @try {
         for (NSUInteger off = 0; off < total; off += CHUNK) {
@@ -213,26 +228,17 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
             fed += len; seq++;
         }
     } @catch (NSException *e) {
-        TTLog(@"[send] 喂入异常: %@", e);
+        TTLog(@"[send] ② 喂入异常: %@", e);
         return @"喂入数据异常";
     }
-    TTLog(@"[send] fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
+    TTLog(@"[send] ② fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
 
-    /* ② endProcessVoiceData（真实 selector 无冒号；v9 观察到调用时 x2 传了 tousr，照做） */
-    @try {
-        epdImp(logic, epd, toUsr);
-        TTLog(@"[send] endProcess done");
-    } @catch (NSException *e) {
-        TTLog(@"[send] endProcess 异常: %@", e);
-    }
-
-    /* ③ 结束标记 queueItem:nil endflag=1 */
+    /* ③ 结束标记 queueItem:_endFlag=1（arg1=nil，与 v9 观察一致） */
     @try {
         Class itemCls = NSClassFromString(@"StreamInputQueueItem");
         id item = nil;
         if (itemCls) {
             item = [[itemCls alloc] init];
-            /* endflag KVC 写不进（v10实测）→ 枚举 ivar 找含 end 的字段，object_setIvar 直接写 */
             BOOL didSet = NO;
             unsigned int count = 0;
             Ivar *ivars = class_copyIvarList(itemCls, &count);
@@ -241,33 +247,29 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
                     const char *n = ivar_getName(ivars[i]);
                     if (n) {
                         NSString *name = [NSString stringWithUTF8String:n];
-                        if ([name.lowercaseString containsString:@"end"]) {
+                        if ([name.lowercaseString containsString:@"endflag"]) {
                             const char *t = ivar_getTypeEncoding(ivars[i]);
-                            TTLog(@"[send] end ivar found: %@ type=%s", name, t ? t : "?");
-                            /* 按类型写 1 */
-                            if (t && (strcmp(t, "B") == 0 || strcmp(t, "c") == 0 || strcmp(t, "i") == 0)) {
-                                object_setIvar(item, ivars[i], (__bridge id)(void *)1);
-                                didSet = YES;
-                            } else if (t && (strcmp(t, "q") == 0 || strcmp(t, "l") == 0)) {
-                                object_setIvar(item, ivars[i], @1);
-                                didSet = YES;
-                            } else {
-                                object_setIvar(item, ivars[i], @1);
-                                didSet = YES;
+                            /* type=I (unsigned int) → 写 NSNumber 会崩，直接用 object_setIvar 传装箱值也不对
+                             * 正确做法：_endFlag 是原始 uint32，object_setIvar 只能放对象。
+                             * 改用 KVC setValue:forKey: 于 _endFlag 名（含下划线也试 endFlag） */
+                            TTLog(@"[send] ③ end ivar: %@ type=%s", name, t ? t : "?");
+                            @try { [item setValue:@1 forKey:@"_endFlag"]; didSet = YES; }
+                            @catch (NSException *e2) {
+                                @try { [item setValue:@1 forKey:@"endFlag"]; didSet = YES; }
+                                @catch (NSException *e3) { TTLog(@"[send] ③ endFlag KVC 均失败"); }
                             }
                         }
                     }
                 }
                 free(ivars);
             }
-            if (!didSet) TTLog(@"[send] 未找到 end 相关 ivar（count=%u）", count);
-            else TTLog(@"[send] endflag 已通过 ivar 写入");
+            if (!didSet) TTLog(@"[send] ③ 未写入 endFlag");
         }
         void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
         pvdqImp(logic, pvdq, nil, item);
-        TTLog(@"[send] endflag=1 sent");
+        TTLog(@"[send] ③ endflag sent");
     } @catch (NSException *e) {
-        TTLog(@"[send] endflag 异常: %@", e);
+        TTLog(@"[send] ③ 异常: %@", e);
     }
 
     return nil; /* 成功 */
