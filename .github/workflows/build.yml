@@ -37,15 +37,25 @@ jobs:
             -o TTSProbe_VC2.dylib \
             TTSProbe_VC2.m
 
+      - name: Build TTSFloat final dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 \
+            -dynamiclib \
+            -framework Foundation -framework UIKit -framework AVFoundation \
+            -o TTSFloat.dylib \
+            TTSFloatFinal.m
+
       - name: Sign with ldid (fake sign)
         run: |
           ldid -S TTSProbe.dylib || true
           ldid -S TTSProbe_VC2.dylib || true
+          ldid -S TTSFloat.dylib || true
 
       - name: Show result
         run: |
-          ls -la TTSProbe.dylib TTSProbe_VC2.dylib
-          file TTSProbe.dylib TTSProbe_VC2.dylib
+          ls -la TTSProbe.dylib TTSProbe_VC2.dylib TTSFloat.dylib
+          file TTSProbe.dylib TTSProbe_VC2.dylib TTSFloat.dylib
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -54,6 +64,7 @@ jobs:
           path: |
             TTSProbe.dylib
             TTSProbe_VC2.dylib
+            TTSFloat.dylib
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
