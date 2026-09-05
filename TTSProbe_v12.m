@@ -61,6 +61,7 @@ static void TTSNewAddNewPart(id self, SEL _cmd,
                              uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7,
                              uint32_t a8, uint32_t a9, uint32_t a10,
                              id a11, id a12) {
+    @autoreleasepool {
     L12(@"---- AddNewPart %@ ----", NSStringFromClass([self class]));
     L12(@"  a1=%@ a2=%u a3=%llu", D12(a1), a2, (unsigned long long)a3);
     L12(@"  a4=%u a5=%u a6=%u a7=%u", a4, a5, a6, a7);
@@ -70,6 +71,8 @@ static void TTSNewAddNewPart(id self, SEL _cmd,
         g_origAddNewPart(self, _cmd, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
     }
     L12(@"---- AddNewPart done ----");
+    }
+
 }
 
 static void HookAddNewPartC(NSString *clsName) {
@@ -92,11 +95,14 @@ static void HookQueueItemObserver(void) {
     if (!m) { L12(@"[MISS] processVoiceData:queueItem:"); return; }
     IMP oldImp = method_getImplementation(m);
     IMP newImp = imp_implementationWithBlock(^(id self, id data, id item) {
-        /* 只看 queueItem 状态，data 只记长度 */
-        NSUInteger len = 0;
-        if ([data isKindOfClass:[NSData class]]) len = [data length];
-        L12(@"[queue] self=%p dataLen=%lu item=%@",
-            self, (unsigned long)len, item ? D12(item) : @"<nil>");
+        /* 只记数据长度 + item 类名/指针——不碰 description（v12 崩点嫌疑） */
+        @autoreleasepool {
+            NSUInteger len = 0;
+            if ([data isKindOfClass:[NSData class]]) len = [data length];
+            const char *icn = item ? class_getName([item class]) : NULL;
+            L12(@"[queue] self=%p dataLen=%lu item=%s:%p",
+                self, (unsigned long)len, icn ? icn : "<nil>", item);
+        }
         ((void (*)(id, SEL, id, id))oldImp)(self, sel, data, item);
     });
     method_setImplementation(m, newImp);
