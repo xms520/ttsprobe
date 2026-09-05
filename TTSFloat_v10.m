@@ -212,18 +212,30 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     const unsigned char *bytes = pcmData.bytes;
     NSUInteger total = pcmData.length;
 
-    /* ① prepareSend（上传触发器，最先调） */
+    /* ① prepareSend（上传触发器）——按 v13 真实松手状态填全 6 个字段：
+     *    chatname/createtime/audioid(递增)/duration/receiveEndFlag=1/receiveDataLength */
     @try {
         id userData = nil;
         @synchronized([NSObject class]) { userData = g_lastUserData; }
         if (userData) {
             NSUInteger ms = total / 32; /* 16kHz mono int16 → bytes/32 = 毫秒 */
-            @try { [userData setValue:@(ms) forKey:@"duration"]; } @catch (NSException *e2) { }
-            @try { [userData setValue:toUsr forKey:@"tousr"]; } @catch (NSException *e3) { }
+            NSUInteger lastLen = total % CHUNK; if (lastLen == 0 && total > 0) lastLen = CHUNK;
+            /* audioid 递增：读捕获值+1（真实录音 920→921 递增） */
+            NSInteger lastAudioId = 0;
+            @try { lastAudioId = [[userData valueForKey:@"audioid"] integerValue]; } @catch (NSException *e0) { }
+            NSInteger newAudioId = lastAudioId + 1;
+            @try { [userData setValue:toUsr forKey:@"tousr"]; } @catch (NSException *e1) { }
+            @try { [userData setValue:toUsr forKey:@"chatname"]; } @catch (NSException *e2) { }
+            @try { [userData setValue:@(ms) forKey:@"duration"]; } @catch (NSException *e3) { }
+            @try { [userData setValue:@(newAudioId) forKey:@"audioid"]; } @catch (NSException *e4) { }
+            @try { [userData setValue:@1 forKey:@"receiveEndFlag"]; } @catch (NSException *e5) { }
+            @try { [userData setValue:@(lastLen) forKey:@"receiveDataLength"]; } @catch (NSException *e6) { }
+            @try { [userData setValue:@((NSInteger)[[NSDate date] timeIntervalSince1970]) forKey:@"createtime"]; } @catch (NSException *e7) { }
             SEL ps = NSSelectorFromString(@"prepareSend:");
             BOOL (*psImp)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
             BOOL ok = psImp(audioSender, ps, userData);
-            TTLog(@"[send] ① prepareSend ret=%d duration=%lu", ok, (unsigned long)ms);
+            TTLog(@"[send] ① prepareSend ret=%d dur=%lu audioid=%ld lastLen=%lu",
+                  ok, (unsigned long)ms, (long)newAudioId, (unsigned long)lastLen);
         } else {
             TTLog(@"[send] ① 无 userData");
         }
