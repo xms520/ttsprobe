@@ -202,6 +202,22 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     void (*pvdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
     void (*epdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
 
+    /* ===== 探测微信 silk 采样率（sampleRateForSilk 属性，strings 证实存在） ===== */
+    NSInteger silkSR = 0;
+    @try {
+        id v = [logic valueForKey:@"sampleRateForSilk"];
+        if ([v isKindOfClass:[NSNumber class]]) silkSR = [v integerValue];
+    } @catch (NSException *e) { }
+    if (silkSR == 0) {
+        @try {
+            id v = [audioSender valueForKey:@"sampleRateForSilk"];
+            if ([v isKindOfClass:[NSNumber class]]) silkSR = [v integerValue];
+        } @catch (NSException *e2) { }
+    }
+    if (silkSR == 0) silkSR = 16000; /* 默认假设 */
+    g_targetSampleRate = silkSR; /* 供下次 DecodeToPCM 用（本次解码已按上次值完成） */
+    TTLog(@"[send] silk sampleRate=%ld (target=%ld)", (long)silkSR, (long)g_targetSampleRate);
+
     /* ===== 真实链路顺序（v8b/v9/v13 综合定案） =====
      * 录音期: processVoiceData 帧持续进缓存
      * 松手:   StopRecord → endProcessVoiceData → 最后帧+endflag=1空帧
@@ -269,7 +285,7 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         id userData = nil;
         @synchronized([NSObject class]) { userData = g_lastUserData; }
         if (userData) {
-            NSUInteger ms = total / 32;
+            NSUInteger ms = total * 1000 / (NSUInteger)(g_targetSampleRate * 2);
             NSInteger lastAudioId = 0;
             @try { lastAudioId = [[userData valueForKey:@"audioid"] integerValue]; } @catch (NSException *e0) { }
             NSInteger newAudioId = lastAudioId + 1;
@@ -402,7 +418,9 @@ static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *aud
     RequestTTSOnce(text, voice, retry);
 }
 
-/* ==================== mp3 → 16kHz mono Int16 PCM ==================== */
+/* ==================== mp3 → PCM（目标采样率由微信 silk 配置决定） ==================== */
+static NSInteger g_targetSampleRate = 16000;
+
 static NSData *DecodeToPCM(NSData *audioData) {
     if (!audioData.length) return nil;
     NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
@@ -414,7 +432,7 @@ static NSData *DecodeToPCM(NSData *audioData) {
     if (!file) { TTLog(@"[pcm] open fail %@", err); [[NSFileManager defaultManager] removeItemAtPath:path error:nil]; return nil; }
 
     AVAudioFormat *src = file.processingFormat;
-    AVAudioFormat *dst = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:16000 channels:1];
+    AVAudioFormat *dst = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:(double)g_targetSampleRate channels:1];
     AVAudioConverter *conv = [[AVAudioConverter alloc] initFromFormat:src toFormat:dst];
     if (!conv) { TTLog(@"[pcm] conv fail"); return nil; }
 
