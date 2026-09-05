@@ -202,25 +202,74 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     void (*pvdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
     void (*epdImp)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
 
-    /* ===== 终极顺序（基于 v8b 的 logic 替换发现） =====
-     * v8b 铁证: 每次录音/上传周期 transcacheLogic 都换新实例
-     *  - 先喂后 prepareSend → 数据留在旧实例，新实例空 → 卡
-     *  - 先 prepareSend 后喂旧 logic → 旧实例已废弃 → 卡
-     * 正确: prepareSend → 【重新读 logic(新实例)】→ endProcess → 喂数据 → endflag
+    /* ===== 真实链路顺序（v8b/v9/v13 综合定案） =====
+     * 录音期: processVoiceData 帧持续进缓存
+     * 松手:   StopRecord → endProcessVoiceData → 最后帧+endflag=1空帧
+     * 最后:   prepareSend:(userData 全状态) 启动上传
+     * => prepareSend 必须最后调（它是 StopRecord 链的终点）
      */
     const NSUInteger CHUNK = 8000;
     const unsigned char *bytes = pcmData.bytes;
     NSUInteger total = pcmData.length;
+    NSUInteger lastLen = total % CHUNK; if (lastLen == 0 && total > 0) lastLen = CHUNK;
 
-    /* ① prepareSend（上传触发器）——按 v13 真实松手状态填全 6 个字段：
-     *    chatname/createtime/audioid(递增)/duration/receiveEndFlag=1/receiveDataLength */
+    /* ① endProcessVoiceData */
+    @try {
+        epdImp(logic, epd, toUsr);
+        TTLog(@"[send] ① endProcess done");
+    } @catch (NSException *e) {
+        TTLog(@"[send] ① endProcess 异常: %@", e);
+    }
+
+    /* ② 喂所有 PCM 分片（单参+双参双入口，末帧 endflag=1）+ 空帧收尾 */
+    NSUInteger fed = 0, seq = 0;
+    @try {
+        Class itemCls = NSClassFromString(@"StreamInputQueueItem");
+        for (NSUInteger off = 0; off < total; off += CHUNK) {
+            NSUInteger len = MIN(CHUNK, total - off);
+            BOOL isLast = (off + CHUNK >= total);
+            NSData *piece = [NSData dataWithBytes:bytes + off length:len];
+            pvdImp(logic, pvd, piece);
+            if (itemCls) {
+                id item = [[itemCls alloc] init];
+                @try { [item setValue:@(isLast ? 1 : 0) forKey:@"_endFlag"]; }
+                @catch (NSException *e2) {
+                    @try { [item setValue:@(isLast ? 1 : 0) forKey:@"endFlag"]; }
+                    @catch (NSException *e3) { }
+                }
+                void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+                pvdqImp(logic, pvdq, piece, item);
+            }
+            fed += len; seq++;
+        }
+        if (itemCls) {
+            id item = [[itemCls alloc] init];
+            @try { [item setValue:@1 forKey:@"_endFlag"]; }
+            @catch (NSException *e2) { @try { [item setValue:@1 forKey:@"endFlag"]; } @catch (NSException *e3) { } }
+            void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+            pvdqImp(logic, pvdq, nil, item);
+            TTLog(@"[send] ② 空帧 endflag=1 sent");
+        }
+    } @catch (NSException *e) {
+        TTLog(@"[send] ② 喂入异常: %@", e);
+        return @"喂入数据异常";
+    }
+    TTLog(@"[send] ② fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
+
+    /* ③ 重读 transcacheLogic（若被替换用新的） */
+    id logicNew = nil;
+    @try { logicNew = [audioSender valueForKey:@"transcacheLogic"]; } @catch (NSException *e) { }
+    if (logicNew && logicNew != logic) {
+        TTLog(@"[send] ③ logic 已替换 -> %@（用新实例）", logicNew);
+        logic = logicNew;
+    }
+
+    /* ④ prepareSend 最后调（复刻 StopRecord→prepareSend），填全 6 字段 */
     @try {
         id userData = nil;
         @synchronized([NSObject class]) { userData = g_lastUserData; }
         if (userData) {
-            NSUInteger ms = total / 32; /* 16kHz mono int16 → bytes/32 = 毫秒 */
-            NSUInteger lastLen = total % CHUNK; if (lastLen == 0 && total > 0) lastLen = CHUNK;
-            /* audioid 递增：读捕获值+1（真实录音 920→921 递增） */
+            NSUInteger ms = total / 32;
             NSInteger lastAudioId = 0;
             @try { lastAudioId = [[userData valueForKey:@"audioid"] integerValue]; } @catch (NSException *e0) { }
             NSInteger newAudioId = lastAudioId + 1;
@@ -234,74 +283,14 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
             SEL ps = NSSelectorFromString(@"prepareSend:");
             BOOL (*psImp)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
             BOOL ok = psImp(audioSender, ps, userData);
-            TTLog(@"[send] ① prepareSend ret=%d dur=%lu audioid=%ld lastLen=%lu",
+            TTLog(@"[send] ④ prepareSend ret=%d dur=%lu audioid=%ld lastLen=%lu",
                   ok, (unsigned long)ms, (long)newAudioId, (unsigned long)lastLen);
         } else {
-            TTLog(@"[send] ① 无 userData");
+            TTLog(@"[send] ④ 无 userData");
         }
     } @catch (NSException *e) {
-        TTLog(@"[send] ① prepareSend 异常: %@", e);
+        TTLog(@"[send] ④ prepareSend 异常: %@", e);
     }
-
-    /* ② prepareSend 后重新读 transcacheLogic（关键！上传消费的是新实例） */
-    id logicNew = nil;
-    @try { logicNew = [audioSender valueForKey:@"transcacheLogic"]; } @catch (NSException *e) { }
-    if (logicNew && logicNew != logic) {
-        TTLog(@"[send] ② logic 已替换 %@ -> %@（用新实例喂）", logic, logicNew);
-        logic = logicNew;
-        /* 新实例上重新绑定方法 */
-        pvd = NSSelectorFromString(@"processVoiceData:");
-        pvdq = NSSelectorFromString(@"processVoiceData:queueItem:");
-        epd = NSSelectorFromString(@"endProcessVoiceData");
-    } else {
-        TTLog(@"[send] ② logic 未变，继续用 %@", logic);
-    }
-
-    /* ③ endProcessVoiceData */
-    @try {
-        epdImp(logic, epd, toUsr);
-        TTLog(@"[send] ③ endProcess done");
-    } @catch (NSException *e) {
-        TTLog(@"[send] ③ endProcess 异常: %@", e);
-    }
-
-    /* ③ 喂 PCM 分片 —— queueItem 双参版（真实录音入口，v12 对照证实）
-     *    真实帧: 单参版+双参版都被调，每帧新 StreamInputQueueItem，最后帧 _endFlag=1，
-     *    松手时还有一帧 dataLen=0 + endflag=1 */
-    NSUInteger fed = 0, seq = 0;
-    @try {
-        Class itemCls = NSClassFromString(@"StreamInputQueueItem");
-        for (NSUInteger off = 0; off < total; off += CHUNK) {
-            NSUInteger len = MIN(CHUNK, total - off);
-            BOOL isLast = (off + CHUNK >= total);
-            NSData *piece = [NSData dataWithBytes:bytes + off length:len];
-            pvdImp(logic, pvd, piece);   /* 单参入口（v9 验证真实帧两个入口都被调） */
-            if (itemCls) {
-                id item = [[itemCls alloc] init];
-                @try { [item setValue:@(isLast ? 1 : 0) forKey:@"_endFlag"]; }
-                @catch (NSException *e2) {
-                    @try { [item setValue:@(isLast ? 1 : 0) forKey:@"endFlag"]; }
-                    @catch (NSException *e3) { }
-                }
-                void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
-                pvdqImp(logic, pvdq, piece, item);
-            }
-            fed += len; seq++;
-        }
-        /* 补发空帧 endflag=1（真实协议：松手时 dataLen=0 + endflag=1，v12 观察到 dataLen=0 帧） */
-        if (itemCls) {
-            id item = [[itemCls alloc] init];
-            @try { [item setValue:@1 forKey:@"_endFlag"]; }
-            @catch (NSException *e2) { @try { [item setValue:@1 forKey:@"endFlag"]; } @catch (NSException *e3) { } }
-            void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
-            pvdqImp(logic, pvdq, nil, item);
-            TTLog(@"[send] ③b 空帧 endflag=1 sent");
-        }
-    } @catch (NSException *e) {
-        TTLog(@"[send] ③ 喂入异常: %@", e);
-        return @"喂入数据异常";
-    }
-    TTLog(@"[send] ④ fed %lu bytes in %lu chunks (queueItem)", (unsigned long)fed, (unsigned long)seq);
 
     return nil; /* 成功 */
 }
