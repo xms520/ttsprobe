@@ -36,6 +36,9 @@
 /* API key 在这里填（环境变量在 TrollStore 注入下读不到） */
 #define K_APIKEY_BUILTIN @"86306ba1cf8d50b2866c8369a14b384fe1ff96900ca822d98bd35274e87b0635"
 
+/* PCM 目标采样率（运行时按微信 silk 配置更新） */
+static NSInteger g_targetSampleRate = 16000;
+
 static NSArray *VoiceList(void) {
     return @[
         @"2学长", @"AD学姐", @"alex克隆", @"阿蕾奇诺", @"爱莉希雅",
@@ -419,8 +422,6 @@ static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *aud
 }
 
 /* ==================== mp3 → PCM（目标采样率由微信 silk 配置决定） ==================== */
-static NSInteger g_targetSampleRate = 16000;
-
 static NSData *DecodeToPCM(NSData *audioData) {
     if (!audioData.length) return nil;
     NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
