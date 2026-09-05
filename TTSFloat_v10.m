@@ -283,7 +283,20 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         logic = logicNew;
     }
 
-    /* ④ prepareSend 最后调（复刻 StopRecord→prepareSend），填全 6 字段 */
+    /* ④ 真实链最后一步：StopRecord → prepareSend（复刻 v8b 完整链） */
+    @try {
+        SEL sr = NSSelectorFromString(@"StopRecord");
+        if ([audioSender respondsToSelector:sr]) {
+            ((void (*)(id, SEL))objc_msgSend)(audioSender, sr);
+            TTLog(@"[send] ④ StopRecord done");
+        } else {
+            TTLog(@"[send] ④ StopRecord 不存在，跳过");
+        }
+    } @catch (NSException *e) {
+        TTLog(@"[send] ④ StopRecord 异常: %@", e);
+    }
+
+    /* ⑤ prepareSend 填全 6 字段 */
     @try {
         id userData = nil;
         @synchronized([NSObject class]) { userData = g_lastUserData; }
@@ -302,13 +315,13 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
             SEL ps = NSSelectorFromString(@"prepareSend:");
             BOOL (*psImp)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
             BOOL ok = psImp(audioSender, ps, userData);
-            TTLog(@"[send] ④ prepareSend ret=%d dur=%lu audioid=%ld lastLen=%lu",
+            TTLog(@"[send] ⑤ prepareSend ret=%d dur=%lu audioid=%ld lastLen=%lu",
                   ok, (unsigned long)ms, (long)newAudioId, (unsigned long)lastLen);
         } else {
-            TTLog(@"[send] ④ 无 userData");
+            TTLog(@"[send] ⑤ 无 userData");
         }
     } @catch (NSException *e) {
-        TTLog(@"[send] ④ prepareSend 异常: %@", e);
+        TTLog(@"[send] ⑤ prepareSend 异常: %@", e);
     }
 
     return nil; /* 成功 */
