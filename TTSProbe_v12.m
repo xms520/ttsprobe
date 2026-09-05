@@ -116,9 +116,9 @@ static void V12Init(void) {
         L12(@"v12 loaded (C-IMP upload probe + queue observer)");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            HookAddNewPartC(@"UploadVoiceCDNMgr");
+            /* AddNewPart C-IMP 转发会崩（14参栈布局对不齐）— 撤掉，只留 queue 观察器 */
             HookQueueItemObserver();
-            L12(@"installed — 1)真实录音发一条 2)TTS发一条，对照");
+            L12(@"installed — queue observer ONLY（对照真实录音 vs TTS 的数据帧）");
         });
     }
 }
