@@ -40,7 +40,6 @@ static int (*L_pcall)(lua_State*, int, int, int);
 static void (*L_pushcclosure)(lua_State*, void*, int);
 static void (*L_setglobal)(lua_State*, const char*);
 static void (*L_pushstring)(lua_State*, const char*);
-static const char* (*L_tostring)(lua_State*, int);
 static void (*L_pushnumber)(lua_State*, double);
 static int (*L_gettop)(lua_State*);
 static void (*L_settop)(lua_State*, int);
@@ -101,7 +100,6 @@ static void resolve_syms(void) {
     L_pushcclosure = (void*)dlsym(g_uf, "lua_pushcclosure");
     L_setglobal    = (void*)dlsym(g_uf, "lua_setglobal");
     L_pushstring   = (void*)dlsym(g_uf, "lua_pushstring");
-    L_tostring     = (void*)dlsym(g_uf, "lua_tostring");
     L_pushnumber   = (void*)dlsym(g_uf, "lua_pushnumber");
     L_pcall     = (void*)dlsym(g_uf, "lua_pcall");
     L_gettop    = (void*)dlsym(g_uf, "lua_gettop");
@@ -111,7 +109,7 @@ static void resolve_syms(void) {
 
 // ── Lua 可调用的 C 函数（谁调它谁提供线程安全；游戏内也能切开关）──
 static int pm_toggle_cfunc(lua_State* L) {
-    const char* key = L_tostring ? L_tostring(L, 1) : NULL;
+    const char* key = L_tolstring ? L_tolstring(L, 1, NULL) : NULL;
     if (!key) return 0;
     if (strcmp(key, "god") == 0) {
         pm_god = !pm_god;
@@ -131,7 +129,7 @@ static int pm_toggle_cfunc(lua_State* L) {
 
 // 查询当前状态（数字）：__PM_state__('god'|'onehit'|'speed')
 static int pm_state_cfunc(lua_State* L) {
-    const char* key = L_tostring ? L_tostring(L, 1) : NULL;
+    const char* key = L_tolstring ? L_tolstring(L, 1, NULL) : NULL;
     double v = 0;
     if (key) {
         if (strcmp(key, "god") == 0) v = pm_god;
@@ -281,9 +279,7 @@ static void pm_engine_tick(void) {
         // 还没装好：探测（主线程安全）+ 安装（主线程安全）
         if (!g_uf) find_uf();
         if (g_uf) resolve_syms();
-        if (g_uf && !g_L) {
-            if (L_getstate) { g_L = L_getstate(); if (g_L) LOG("lua=%p\n", (void*)g_L); }
-        }
+        if (g_uf && !g_L) try_get_lua();
         if (g_L && !g_beat_ok) install_beat();
         if (ticks % 40 == 0) LOG("probe t=%d uf=%s L=%s beat=%d\n", ticks, g_uf?"ok":"-", g_L?"ok":"-", (int)g_beat_ok);
     } else {
@@ -718,7 +714,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v2 pid=%d\n", getpid());
+        LOG("PMGlass v3 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
@@ -728,10 +724,21 @@ __attribute__((constructor)) static void fg_ctor() {
         }
         LOG("loaded in %s\n", bid.UTF8String);
 
-        // v2：无后台线程。引擎探测/安装由 UI 的 pm_refresh timer 顺带驱动（主线程），
-        // 但 UI 面板未打开时 NSTimer 不跑 —— 加一个独立的轻量主线程启动探测链：
+        // v3：常驻主队列 timer（0.5s）驱动引擎探测/安装/30s 自愈——
+        // v2 只在面板打开时才驱动（NSTimer 挂 panel），面板关着引擎就停摆；
+        // Lua VM 通常在启动后几秒才出现，一次性 dispatch_after 探不到。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ pm_engine_tick(); });
+                       dispatch_get_main_queue(), ^{
+            static dispatch_source_t t = nil;
+            if (t) return;
+            t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+            if (!t) { LOG("engine timer fail\n"); return; }
+            dispatch_source_set_timer(t, DISPATCH_TIME_NOW,
+                                      (uint64_t)(0.5 * NSEC_PER_SEC), (uint64_t)(0.1 * NSEC_PER_SEC));
+            dispatch_source_set_event_handler(t, ^{ pm_engine_tick(); });
+            dispatch_resume(t);
+            LOG("engine timer on\n");
+        });
 
         // App 启动后再挂 UI（构造函数早于 UIApplicationMain，需延迟）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
