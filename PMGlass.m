@@ -107,14 +107,6 @@ static void resolve_syms(void) {
     L_gettop    = (void*)dlsym(g_uf, "lua_gettop");
     L_settop    = (void*)dlsym(g_uf, "lua_settop");
     L_tolstring = (void*)dlsym(g_uf, "lua_tolstring");
-    I_domain_get      = (void*)dlsym(g_uf, "il2cpp_domain_get");
-    I_domain_assemblies = (void*)dlsym(g_uf, "il2cpp_domain_get_assemblies");
-    I_asm_get_image   = (void*)dlsym(g_uf, "il2cpp_assembly_get_image");
-    I_image_get_name  = (void*)dlsym(g_uf, "il2cpp_image_get_name");
-    I_class_from_name = (void*)dlsym(g_uf, "il2cpp_class_from_name");
-    I_class_field     = (void*)dlsym(g_uf, "il2cpp_class_get_field_from_name");
-    I_field_static_get= (void*)dlsym(g_uf, "il2cpp_field_static_get_value");
-    I_thread_attach   = (void*)dlsym(g_uf, "il2cpp_thread_attach");
 }
 
 // ── Lua 可调用的 C 函数（谁调它谁提供线程安全；游戏内也能切开关）──
@@ -178,40 +170,6 @@ static void try_get_lua(void) {
     if (L_toluamain) {
         lua_State* s = L_toluamain();
         if (s) { g_L = s; LOG("lua via tolua_getmainstate=%p\n", s); return; }
-    }
-    // il2cpp 兜底：LuaState.mainState 静态字段（一次性验证 pcall，低风险）
-    if (I_domain_get && I_domain_assemblies && I_asm_get_image && I_image_get_name &&
-        I_class_from_name && I_class_field && I_field_static_get && L_loadstring && L_pcall) {
-        Il2CppDomain* dom = I_domain_get();
-        if (!dom) return;
-        size_t n = 0;
-        Il2CppAssembly** asms = I_domain_assemblies(dom, &n);
-        for (size_t i = 0; i < n; i++) {
-            const Il2CppImage* img = I_asm_get_image(asms[i]);
-            if (!img) continue;
-            const char* nm = I_image_get_name(img);
-            if (!nm || strcmp(nm, "Assembly-CSharp.dll") != 0) continue;
-            Il2CppClass* k = I_class_from_name(img, "LuaInterface", "LuaState");
-            if (!k) break;
-            FieldInfo* f = I_class_field(k, "mainState");
-            if (!f) break;
-            if (I_thread_attach) I_thread_attach(dom);
-            void* val = NULL;
-            I_field_static_get(f, &val);
-            if (val) {
-                lua_State* cand = *(lua_State**)((char*)val + 16);
-                if (cand) {
-                    int top = L_gettop(cand);
-                    if (L_loadstring(cand, "return 1") == 0 && L_pcall(cand, 0, 1, 0) == 0) {
-                        g_L = cand; LOG("lua via il2cpp mainState=%p VERIFIED\n", cand);
-                        L_settop(cand, top);
-                        return;
-                    }
-                    if (L_settop) L_settop(cand, top);
-                }
-            }
-            break;
-        }
     }
 }
 
@@ -309,61 +267,55 @@ static void install_beat(void) {
     g_beat_ok = (rc == 0);
 }
 
-// ── worker：后台探测引擎 + 30s ping 自愈 + hook 状态检查 ──
-static void* worker(void* a) {
-    (void)a;
-    int hb = 0;
-    // Phase 1：找 UnityFramework 与 lua_State（最多 12 分钟）
-    for (int i = 0; i < 1440; i++) {
+// ── v2 引擎装载（全部主线程：dispatch_after 链式重试，零 worker 线程）──
+// 34 个版本教训：任何非主线程的 Lua pcall 都与 60fps 主循环竞态崩。
+// v1 的 worker 虽把 install 投递主线程，但 30s ping 的 lua_dostring("return 1")
+// 仍在 worker 线程执行 → 启动约 30s 后闪退（用户实测"安装引擎闪退"根因）。
+// v2：探测/安装/自愈全部主线程；ping 并入 UI 的 pm_refresh timer。
+
+static void pm_engine_tick(void) {
+    static int ticks = 0;
+    ticks++;
+    // 每 tick（0.5s）检查：引擎就绪了吗？
+    if (!g_L || !g_beat_ok) {
+        // 还没装好：探测（主线程安全）+ 安装（主线程安全）
         if (!g_uf) find_uf();
         if (g_uf) resolve_syms();
-        if (g_uf && !g_L && i > 4) try_get_lua();
-        if (g_L && i > 60) break;   // 引擎就绪后再等 30s（游戏稳定）
-        if (i % 20 == 0) LOG("hb%d imgs=%u uf=%p L=%p\n", hb++, _dyld_image_count(), g_uf, (void*)g_L);
-        usleep(500000);
-    }
-    if (!g_L) { LOG("NO LUA after 12min\n"); return NULL; }
-    LOG("Lua VM=%p, install via main queue...\n", (void*)g_L);
-    // Phase 2：install 投递主线程（worker 直接 pcall 长脚本 = 与 60fps 主循环竞态必崩）
-    dispatch_async(dispatch_get_main_queue(), ^{ install_beat(); });
-    // Phase 3：常驻自愈
-    const char* home = getenv("HOME");
-    char hp[512];
-    snprintf(hp, sizeof(hp), "%s/Documents/pm_hooked", home ? home : "/var/mobile");
-    remove(hp);   // 清掉上次运行的残留（hook 状态以本次为准）
-    time_t last_ping = time(NULL);
-    time_t last_chk = 0;
-    int tick = 0;
-    while (1) {
-        if (time(NULL) - last_ping > 30) {
-            last_ping = time(NULL);
-            if (g_L) {
-                int pr = lua_dostring("return 1");
-                if (pr != 0) {
-                    // VM 被引擎重启 → 重取 L 重装
-                    LOG("lua dead (rc=%d) -> re-acquiring\n", pr);
-                    g_L = NULL; g_beat_ok = 0;
-                    if (L_getstate) g_L = L_getstate();
-                    if (g_L) dispatch_async(dispatch_get_main_queue(), ^{ install_beat(); });
-                } else if (!g_beat_ok) {
-                    LOG("beat retry (alive but not installed)\n");
-                    dispatch_async(dispatch_get_main_queue(), ^{ install_beat(); });
-                }
-            } else {
-                if (L_getstate) { g_L = L_getstate(); if (g_L) dispatch_async(dispatch_get_main_queue(), ^{ install_beat(); }); }
+        if (g_uf && !g_L) {
+            if (L_getstate) { g_L = L_getstate(); if (g_L) LOG("lua=%p\n", (void*)g_L); }
+        }
+        if (g_L && !g_beat_ok) install_beat();
+        if (ticks % 40 == 0) LOG("probe t=%d uf=%s L=%s beat=%d\n", ticks, g_uf?"ok":"-", g_L?"ok":"-", (int)g_beat_ok);
+    } else {
+        // 已装好：每 60 tick（30s）ping 自愈（主线程 pcall = 与游戏串行 = 安全）
+        static int ping_ctr = 0;
+        if (++ping_ctr >= 60) {
+            ping_ctr = 0;
+            int pr = lua_dostring("return 1");
+            if (pr != 0) {
+                LOG("lua dead (rc=%d) -> re-attach\n", pr);
+                g_L = NULL; g_beat_ok = 0;
+                if (L_getstate) g_L = L_getstate();
+                if (g_L) install_beat();
             }
         }
-        if (time(NULL) - last_chk >= 2) {
-            last_chk = time(NULL);
+    }
+    // hook 状态检查（文件存在性，安全）
+    {
+        static int chk = 0;
+        if (++chk >= 4) {
+            chk = 0;
+            const char* home = getenv("HOME");
+            char hp[512];
+            snprintf(hp, sizeof(hp), "%s/Documents/pm_hooked", home ? home : "/var/mobile");
             struct stat st;
             g_hook_flag = (stat(hp, &st) == 0);
         }
-        if ((tick++ % 60) == 30) LOG("alive god=%d hit=%d spd=%d pulls=%d beat=%d hook=%d\n",
-            (int)pm_god, (int)pm_hit, (int)pm_spd, (int)g_state_pulls, (int)g_beat_ok, (int)g_hook_flag);
-        usleep(500000);
     }
-    return NULL;
+    if (ticks % 120 == 60) LOG("alive god=%d hit=%d spd=%d pulls=%d beat=%d hook=%d\n",
+        (int)pm_god, (int)pm_hit, (int)pm_spd, (int)g_state_pulls, (int)g_beat_ok, (int)g_hook_flag);
 }
+
 
 // ════════════════════════════════════════════════════════════════════════
 // Part 2  FloatGlass UI（玻璃按钮 + 玻璃面板，面板内嵌功能开关）
@@ -660,6 +612,7 @@ static NSString *pm_engineText(void) {
 }
 
 - (void)pm_refresh {
+    pm_engine_tick();   // v2：UI timer 顺带驱动引擎（主线程，含 30s ping 自愈）
     _engLabel.text = pm_engineText();
     [_godBtn setTitle:pm_godText() forState:UIControlStateNormal];
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
@@ -765,7 +718,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v1 pid=%d\n", getpid());
+        LOG("PMGlass v2 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
@@ -775,10 +728,10 @@ __attribute__((constructor)) static void fg_ctor() {
         }
         LOG("loaded in %s\n", bid.UTF8String);
 
-        // 功能引擎后台线程（探测 UnityFramework → Lua → install → 自愈）
-        pthread_t t;
-        pthread_create(&t, NULL, worker, NULL);
-        pthread_detach(t);
+        // v2：无后台线程。引擎探测/安装由 UI 的 pm_refresh timer 顺带驱动（主线程），
+        // 但 UI 面板未打开时 NSTimer 不跑 —— 加一个独立的轻量主线程启动探测链：
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ pm_engine_tick(); });
 
         // App 启动后再挂 UI（构造函数早于 UIApplicationMain，需延迟）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
