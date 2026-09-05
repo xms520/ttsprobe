@@ -253,7 +253,7 @@ static void install_beat(void) {
         "local regok = (ub and ub.Add) and true or false\n"
         "rawset(_G, '__PM_R__', regok)\n"
         "local sf = io.open('%s/Documents/pm.status','w')\n"
-        "if sf then sf:write('reg='..(regok and 'OK' or 'FAIL')..'\n') sf:close() end\n",
+        "if sf then sf:write('reg='..(regok and 'OK' or 'FAIL')..'\\n') sf:close() end\n",
         home, home, home);
     if (n >= (int)sizeof(rs) - 8) { LOG("script too long: %d\n", n); return; }
     // 注册 C 函数（pushcclosure 一步）
@@ -720,7 +720,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v3 pid=%d\n", getpid());
+        LOG("PMGlass v4 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
