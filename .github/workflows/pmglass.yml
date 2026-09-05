@@ -6,7 +6,7 @@ on:
     branches: [ master ]
     paths:
       - "PMGlass.m"
-      - ".github/workflows/floatglass.yml"
+      - ".github/workflows/pmglass.yml"
 
 permissions:
   contents: write
