@@ -113,12 +113,12 @@ __attribute__((constructor))
 static void V12Init(void) {
     @autoreleasepool {
         g_logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/TTSProbe_v13.log"];
-        L13_log(@"v13 loaded (C-IMP upload probe + queue observer)");
+        L13_log(@"v13 loaded (userData dump + queue observer)");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            /* AddNewPart C-IMP 转发会崩（14参栈布局对不齐）— 撤掉，只留 queue 观察器 */
+            HookPrepareSendDump();
             HookQueueItemObserver();
-            L13_log(@"installed — queue observer ONLY（对照真实录音 vs TTS 的数据帧）");
+            L13_log(@"installed — userData dump + queue observer（真实录音一次 + TTS一次，对照）");
         });
     }
 }
