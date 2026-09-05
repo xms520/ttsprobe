@@ -253,39 +253,43 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         TTLog(@"[send] ③ endProcess 异常: %@", e);
     }
 
-    /* ③ 喂所有 PCM 分片 */
+    /* ③ 喂 PCM 分片 —— queueItem 双参版（真实录音入口，v12 对照证实）
+     *    真实帧: 单参版+双参版都被调，每帧新 StreamInputQueueItem，最后帧 _endFlag=1，
+     *    松手时还有一帧 dataLen=0 + endflag=1 */
     NSUInteger fed = 0, seq = 0;
     @try {
+        Class itemCls = NSClassFromString(@"StreamInputQueueItem");
         for (NSUInteger off = 0; off < total; off += CHUNK) {
             NSUInteger len = MIN(CHUNK, total - off);
+            BOOL isLast = (off + CHUNK >= total);
             NSData *piece = [NSData dataWithBytes:bytes + off length:len];
-            pvdImp(logic, pvd, piece);
+            pvdImp(logic, pvd, piece);   /* 单参入口（v9 验证真实帧两个入口都被调） */
+            if (itemCls) {
+                id item = [[itemCls alloc] init];
+                @try { [item setValue:@(isLast ? 1 : 0) forKey:@"_endFlag"]; }
+                @catch (NSException *e2) {
+                    @try { [item setValue:@(isLast ? 1 : 0) forKey:@"endFlag"]; }
+                    @catch (NSException *e3) { }
+                }
+                void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+                pvdqImp(logic, pvdq, piece, item);
+            }
             fed += len; seq++;
+        }
+        /* 补发空帧 endflag=1（真实协议：松手时 dataLen=0 + endflag=1，v12 观察到 dataLen=0 帧） */
+        if (itemCls) {
+            id item = [[itemCls alloc] init];
+            @try { [item setValue:@1 forKey:@"_endFlag"]; }
+            @catch (NSException *e2) { @try { [item setValue:@1 forKey:@"endFlag"]; } @catch (NSException *e3) { } }
+            void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+            pvdqImp(logic, pvdq, nil, item);
+            TTLog(@"[send] ③b 空帧 endflag=1 sent");
         }
     } @catch (NSException *e) {
         TTLog(@"[send] ③ 喂入异常: %@", e);
         return @"喂入数据异常";
     }
-    TTLog(@"[send] ④ fed %lu bytes in %lu chunks", (unsigned long)fed, (unsigned long)seq);
-
-    /* ④ 结束标记 queueItem:_endFlag=1 */
-    @try {
-        Class itemCls = NSClassFromString(@"StreamInputQueueItem");
-        id item = nil;
-        if (itemCls) {
-            item = [[itemCls alloc] init];
-            @try { [item setValue:@1 forKey:@"_endFlag"]; }
-            @catch (NSException *e2) {
-                @try { [item setValue:@1 forKey:@"endFlag"]; }
-                @catch (NSException *e3) { TTLog(@"[send] ⑤ endFlag KVC 失败"); }
-            }
-        }
-        void (*pvdqImp)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
-        pvdqImp(logic, pvdq, nil, item);
-        TTLog(@"[send] ⑤ endflag sent");
-    } @catch (NSException *e) {
-        TTLog(@"[send] ⑤ 异常: %@", e);
-    }
+    TTLog(@"[send] ④ fed %lu bytes in %lu chunks (queueItem)", (unsigned long)fed, (unsigned long)seq);
 
     return nil; /* 成功 */
 }
