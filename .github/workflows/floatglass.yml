@@ -1,0 +1,45 @@
+name: build-floatglass
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - "FloatGlass.m"
+      - ".github/workflows/floatglass.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid || true
+
+      - name: Build FloatGlass dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 -O2 \
+            -dynamiclib \
+            -framework Foundation -framework UIKit -framework CoreGraphics -framework QuartzCore \
+            -o FloatGlass.dylib \
+            FloatGlass.m
+
+      - name: Fake-sign
+        run: ldid -S FloatGlass.dylib || true
+
+      - name: Show result
+        run: |
+          ls -la FloatGlass.dylib
+          file FloatGlass.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatGlass-dylib
+          path: FloatGlass.dylib
