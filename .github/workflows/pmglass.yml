@@ -1,0 +1,45 @@
+name: build-pmglass
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - "PMGlass.m"
+      - ".github/workflows/floatglass.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid || true
+
+      - name: Build FloatGlass dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 -O2 \
+            -dynamiclib \
+            -framework Foundation -framework UIKit -framework CoreGraphics -framework QuartzCore \
+            -o PMGlass.dylib \
+            PMGlass.m
+
+      - name: Fake-sign
+        run: ldid -S PMGlass.dylib || true
+
+      - name: Show result
+        run: |
+          ls -la PMGlass.dylib
+          file PMGlass.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PMGlass-dylib
+          path: PMGlass.dylib
