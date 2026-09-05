@@ -1,5 +1,5 @@
 //
-//  PMGlass v7 —— 塔塔冒险队 功能版悬浮窗（v45 引擎 + FloatGlass UI + 打赏/自定义图标）
+//  PMGlass v8 —— 塔塔冒险队 功能悬浮窗（v45 引擎 + FloatGlass UI + 打赏/自定义图标）
 //  ────────────────────────────────────────────────────────────────────────
 //  引擎 = PMLib v45 原版逐字保留（实测秒杀生效那版）：
 //    pthread worker 探测 → CFRunLoopPerformBlock 投递主线程 install
@@ -343,12 +343,25 @@ static int g_beat_ok = 0;   // v34: install 成功标志（失败则 30s 后重�
 
 // v38: 把一段 C 回调投递到游戏主线程 runloop 执行（光遇 ExecuteLuaAsync 同款）
 // block 捕获：用 C 全局变量中转（block 捕获局部变量在 -fno-objc-arc 下复杂）
-static char g_pending_job = 0;  // 0=无 1=verify+install 2=reinstall
+static char g_pending_job = 0;  // 0=无 1=verify+install 2=reinstall 3=ping
+static volatile int g_ping_pending = 0;
 static void install_beat(void);
 static void run_pending_on_main(void) {
     if (g_pending_job == 0) return;
     int job = g_pending_job; g_pending_job = 0;
     if (!g_L) return;
+    if (job == 3) {
+        // v8: 30s ping —— 在游戏主线程执行（与游戏自身 Lua 串行，绝不竞态）
+        int pr = lua_dostring("return 1");
+        const char* ph = getenv("HOME");
+        char pp[512];
+        snprintf(pp, sizeof(pp), "%s/Documents/pm.ping", ph ? ph : "/var/mobile");
+        FILE* pf = fopen(pp, "w");
+        if (pf) { fprintf(pf, "%s\n", pr == 0 ? "alive" : "dead"); fclose(pf); }
+        LOG("ping rc=%d (main)\n", pr);
+        g_ping_pending = 0;
+        return;
+    }
     if (job == 1) {
         int r = lua_dostring("local x = 1 return x");
         LOG("channel verify rc=%d (0=OK) [main]\n", r);
@@ -497,19 +510,37 @@ static void* worker(void* a) {
         (void)ui_tries; (void)last_ui;
         // v29: Lua VM 自愈 —— 每 30s ping 一次（极轻量 return 1）；
         // 失败 = 引擎重启了 VM（Restart/DisposeOldLuaState）→ 重取 L + 重装回调
+        // v8 修复（crash log 实锤）：ping 不能在 worker 线程跑 lua_dostring——
+        // VM 被引擎销毁的瞬间 luaL_loadstring 读到已释放内存 = SIGSEGV（worker+lua_dostring 栈）。
+        // 改为投递到游戏主线程执行（与 install 同通道）；ping 结果经 pm.status 回传。
         if (time(NULL) - last_ping > 30) {
             last_ping = time(NULL);
             if (g_L) {
-                int pr = lua_dostring("return 1");
-                if (pr != 0) {
-                    LOG("lua dead (rc=%d) -> re-acquiring\n", pr);
-                    g_L = NULL;
-                    if (L_getstate) { g_L = L_getstate(); LOG("new L=%p\n", (void*)g_L); }
-                    if (g_L) { g_pending_job = 2; post_to_main(NULL); }
-                } else if (!g_beat_ok) {
-                    // v34: Lua 活着但 install 失败过（沙箱 __index 状态性错误）→ 静默重试
-                    LOG("beat retry (alive but not installed)\n");
-                    g_pending_job = 2; post_to_main(NULL);
+                g_ping_pending = 1;
+                g_pending_job = 3;   // 3 = ping（run_pending_on_main 在主线程执行）
+                post_to_main(NULL);
+                // 结果稍后由下一轮检查 pm.status 的 ping 行
+                static time_t last_pingchk = 0;
+                if (time(NULL) - last_pingchk >= 2) {
+                    last_pingchk = time(NULL);
+                    const char* ph = getenv("HOME");
+                    char pp[512];
+                    snprintf(pp, sizeof(pp), "%s/Documents/pm.ping", ph ? ph : "/var/mobile");
+                    FILE* pf = fopen(pp, "r");
+                    if (pf) {
+                        char pb[32] = {0};
+                        fread(pb, 1, sizeof(pb) - 1, pf);
+                        fclose(pf);
+                        if (strncmp(pb, "dead", 4) == 0) {
+                            LOG("ping says dead -> re-acquiring\n");
+                            g_L = NULL;
+                            if (L_getstate) { g_L = L_getstate(); LOG("new L=%p\n", (void*)g_L); }
+                            if (g_L) { g_pending_job = 2; post_to_main(NULL); }
+                        } else if (!g_beat_ok) {
+                            LOG("beat retry (alive but not installed)\n");
+                            g_pending_job = 2; post_to_main(NULL);
+                        }
+                    }
                 }
             } else {
                 if (L_getstate) { g_L = L_getstate(); if (g_L) { LOG("L re-acquired %p\n",(void*)g_L); g_pending_job = 2; post_to_main(NULL); } }
@@ -776,13 +807,12 @@ static NSString *pm_engineText(void) {
         title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         [self addSubview:title];
 
-        // ── 功能开关（无敌/秒杀）+ 打赏 ──
+        // ── 功能开关（无敌/秒杀）+ 引擎状态 + 打赏贴底 ──
         _godBtn = [self pm_mkSwitch:CGRectMake(16, 56, 248, 46) title:pm_godText() action:@selector(pm_godTap:)];
         _hitBtn = [self pm_mkSwitch:CGRectMake(16, 110, 248, 46) title:pm_hitText() action:@selector(pm_hitTap:)];
-        _tipBtn = [self pm_mkTipButton:CGRectMake(16, 164, 248, 46)];
 
         // 引擎状态行
-        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 226, 248, 34)];
+        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 172, 248, 34)];
         _engLabel.text = pm_engineText();
         _engLabel.textAlignment = NSTextAlignmentCenter;
         _engLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
@@ -799,6 +829,9 @@ static NSString *pm_engineText(void) {
         close.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
         [close addTarget:self action:@selector(fg_close) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:close];
+
+        // 打赏按钮（面板最下方）
+        _tipBtn = [self pm_mkTipButton:CGRectMake(16, self.bounds.size.height - 46 - 16, 248, 46)];
 
         // 拖动：可全屏任意移动
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(fg_drag:)];
@@ -823,7 +856,7 @@ static NSString *pm_engineText(void) {
     b.backgroundColor    = [UIColor colorWithRed:0.98 green:0.75 blue:0.30 alpha:0.30];
     b.tintColor = [UIColor whiteColor];
     b.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-    [b setTitle:@"❤️ 打赏作者" forState:UIControlStateNormal];
+    [b setTitle:@"❤️ 打赏" forState:UIControlStateNormal];
     [b addTarget:self action:@selector(pm_tipTap:) forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:b];
     return b;
@@ -862,7 +895,7 @@ static NSString *pm_engineText(void) {
     [card addSubview:iv];
 
     UILabel *cap = [[UILabel alloc] initWithFrame:CGRectMake(0, iside - 6, iside, 34)];
-    cap.text = @"打赏作者 · 点任意处关闭";
+    cap.text = @"打赏 · 点任意处关闭";
     cap.textAlignment = NSTextAlignmentCenter;
     cap.textColor = [UIColor darkGrayColor];
     cap.font = [UIFont boldSystemFontOfSize:14];
@@ -1036,7 +1069,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v7 pid=%d\n", getpid());
+        LOG("PMGlass v8 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
