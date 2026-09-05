@@ -268,51 +268,48 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
      * 不猜 sampleRate/channels 等额外参数，避免 ABI 崩溃。
      */
     Class silkCls = NSClassFromString(@"MJSilkCodec");
-    SEL silkSel = NSSelectorFromString(@"encodeToSilkFromPCMData:");
     NSData *silkData = nil;
 
-    if (silkCls && [silkCls instancesRespondToSelector:silkSel]) {
+    /* 真实存在的是实例方法 encodeFromPCMData:（type=@24@0:8@16 args=3 return=@，v12_debug 实测）
+     * 先试 encodeToSilkFromPCMData:（若存在），再试 encodeFromPCMData:（已证实存在） */
+    NSArray *candidates = @[@"encodeToSilkFromPCMData:", @"encodeFromPCMData:"];
+    for (NSString *selName in candidates) {
+        SEL silkSel = NSSelectorFromString(selName);
+        if (!(silkCls && [silkCls instancesRespondToSelector:silkSel])) continue;
+
         Method sm = class_getInstanceMethod(silkCls, silkSel);
         const char *enc = sm ? method_getTypeEncoding(sm) : NULL;
         NSUInteger nargs = sm ? method_getNumberOfArguments(sm) : 0;
 
-        TTLog(@"[silk] candidate encodeToSilkFromPCMData: type=%s args=%lu",
-              enc ? enc : "(null)", (unsigned long)nargs);
+        TTLog(@"[silk] candidate %@ type=%s args=%lu",
+              selName, enc ? enc : "(null)", (unsigned long)nargs);
 
-        /*
-         * 常见 ObjC 编码：
-         * @24 表示返回 id、self/_cmd + 1 个对象参数。
-         */
         BOOL safeOneObjectArg =
-            enc &&
-            nargs == 3 &&
-            enc[0] == '@' &&
+            enc && nargs == 3 && enc[0] == '@' &&
             (strstr(enc, "@24") != NULL || strstr(enc, "@16") != NULL);
 
-        if (safeOneObjectArg) {
-            id codec = nil;
-            @try {
-                codec = [[silkCls alloc] init];
-            } @catch (__unused NSException *e) {}
+        if (!safeOneObjectArg) {
+            TTLog(@"[silk] %@ 非 1对象参数签名，跳过", selName);
+            continue;
+        }
 
-            if (codec) {
-                @try {
-                    id result = ((id (*)(id, SEL, id))objc_msgSend)(codec, silkSel, pcmData);
-                    if ([result isKindOfClass:[NSData class]] && [result length] > 0) {
-                        silkData = result;
-                        TTLog(@"[silk] encoded PCM=%lu -> Silk=%lu bytes",
-                              (unsigned long)pcmData.length,
-                              (unsigned long)silkData.length);
-                    } else {
-                        TTLog(@"[silk] encoder returned %@; no NSData output",
-                              result ? NSStringFromClass([result class]) : @"nil");
-                    }
-                } @catch (NSException *e) {
-                    TTLog(@"[silk] encoder exception: %@", e);
-                }
+        id codec = nil;
+        @try { codec = [[silkCls alloc] init]; } @catch (__unused NSException *e) {}
+        if (!codec) continue;
+
+        @try {
+            id result = ((id (*)(id, SEL, id))objc_msgSend)(codec, silkSel, pcmData);
+            if ([result isKindOfClass:[NSData class]] && [result length] > 0) {
+                silkData = result;
+                TTLog(@"[silk] encoded via %@ PCM=%lu -> Silk=%lu bytes",
+                      selName, (unsigned long)pcmData.length, (unsigned long)silkData.length);
+                break; /* 成功，停止尝试 */
+            } else {
+                TTLog(@"[silk] %@ 返回 %@（非NSData/空），试下一个",
+                      selName, result ? NSStringFromClass([result class]) : @"nil");
             }
-        } else {
-            TTLog(@"[silk] signature is not the safe one-object form; NOT calling it");
+        } @catch (NSException *e) {
+            TTLog(@"[silk] %@ 异常: %@", selName, e);
         }
     }
 
@@ -413,10 +410,13 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         return @"transcacheLogic 没有可用的 PCM 输入接口";
 
     const NSUInteger CHUNK = 8000; /* 保持 v10 已验证的块大小 */
-    const unsigned char *bytes = pcmData.bytes;
-    NSUInteger total = pcmData.length;
+    /* v13b: 若自己编码出 silk，喂 silk（微信上传管线期待编码后的流）；否则回退 PCM */
+    NSData *feedData = (silkData && silkData.length > 0) ? silkData : pcmData;
+    const unsigned char *bytes = feedData.bytes;
+    NSUInteger total = feedData.length;
     NSUInteger fed = 0;
     NSUInteger seq = 0;
+    TTLog(@"[send] 喂入数据源: %@", (feedData == silkData) ? @"SILK(自编码)" : @"PCM(回退)");
 
     /*
      * 只选择一个入口。
@@ -473,7 +473,7 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         return @"PCM输入异常";
     }
 
-    TTLog(@"[send] PCM fed=%lu bytes chunks=%lu; silk=%lu bytes (encoder probe only)", (unsigned long)fed, (unsigned long)seq, (unsigned long)silkData.length);
+    TTLog(@"[send] fed=%lu bytes chunks=%lu (silk=%lu, pcm=%lu)", (unsigned long)fed, (unsigned long)seq, (unsigned long)silkData.length, (unsigned long)pcmData.length);
 
     /*
      * 正确处理结束接口：
