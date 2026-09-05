@@ -1,10 +1,10 @@
 //
-//  PMGlass v6 —— 塔塔冒险队 功能版悬浮窗（v45 实测成功配方 + FloatGlass UI）
+//  PMGlass v7 —— 塔塔冒险队 功能版悬浮窗（v45 引擎 + FloatGlass UI + 打赏/自定义图标）
 //  ────────────────────────────────────────────────────────────────────────
 //  引擎 = PMLib v45 原版逐字保留（实测秒杀生效那版）：
 //    pthread worker 探测 → CFRunLoopPerformBlock 投递主线程 install
 //    → UpdateBeat 每帧回调 → hook ed.UnitComponent.TakeDamage/LoseHP
-//    + BattleEngine.GetTimeScale → pm.flags 文件通道 → 30s ping 自愈
+//    → pm.flags 文件通道（god/onehit）→ 30s ping 自愈
 //  UI = FloatGlass 玻璃按钮/面板；开关按钮写 pm.flags（≤2s 生效）
 //  注入：TrollFools / TrollStore 注入到 IGame-Mainland
 //
@@ -23,6 +23,8 @@
 #include <dispatch/dispatch.h>
 #include <mach/mach.h>
 #include <pthread.h>
+#include "pm_res_tip.h"
+#include "pm_res_ball.h"
 
 typedef struct lua_State lua_State;
 static lua_State* (*L_getstate)(void);
@@ -47,7 +49,7 @@ static void* (*I_thread_attach)(Il2CppDomain*);
 static void* g_uf = NULL;
 static lua_State* g_L = NULL;
 
-static volatile int f_godmode = 0, f_onehit = 0, f_speed = 0, f_dump = 0;
+static volatile int f_godmode = 0, f_onehit = 0, f_dump = 0;
 static volatile int f_probe = 0;
 static int g_dump_done = 0, g_probe_done = 0;  // 一次性动作防重入
 static FILE* g_log = NULL;
@@ -124,8 +126,7 @@ static int lua_dostring(const char* code) {
 
 static void sync_cfg(void) {
     // v11 前：开关仅记录状态（Lua 侧 hook 等全局表分析后再接）
-    LOG("cfg sync: god=%d onehit=%d speed=%d (lua hooks pending v11)\n",
-        f_godmode, f_onehit, f_speed?3:1);
+    LOG("cfg sync: god=%d onehit=%d\n", f_godmode, f_onehit);
 }
 
 static void try_get_lua(void) {
@@ -185,21 +186,18 @@ static void read_flags(void) {
     FILE* f = fopen(path, "r");
     if (!f) return;
     char line[128];
-    int newgod = f_godmode, newhit = f_onehit, newspd = f_speed, newdump = 0, newprobe = 0;
+    int newgod = f_godmode, newhit = f_onehit, newdump = 0, newprobe = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "god=1", 5) == 0) newgod = 1;
         else if (strncmp(line, "god=0", 5) == 0) newgod = 0;
         else if (strncmp(line, "onehit=1", 8) == 0) newhit = 1;
         else if (strncmp(line, "onehit=0", 8) == 0) newhit = 0;
-        else if (strncmp(line, "speed=3", 7) == 0) newspd = 1;
-        else if (strncmp(line, "speed=1", 7) == 0) newspd = 0;
         else if (strncmp(line, "dump=1", 6) == 0) newdump = 1;
         else if (strncmp(line, "probe=1", 7) == 0) newprobe = 1;
     }
     fclose(f);
     if (newgod != f_godmode) { f_godmode = newgod; LOG("flag: god=%d\n", newgod); sync_cfg(); }
     if (newhit != f_onehit) { f_onehit = newhit; LOG("flag: onehit=%d\n", newhit); sync_cfg(); }
-    if (newspd != f_speed)  { f_speed = newspd; LOG("flag: speed=%d\n", newspd); sync_cfg(); }
     if (newprobe && !g_probe_done) {
         g_probe_done = 1;
         f_probe = 1;
@@ -380,7 +378,7 @@ static void install_beat(void) {
     char rs[4096];
     snprintf(rs, sizeof(rs),
         // 主回调：状态轮询 + hook 安装，全部游戏主线程执行
-        "rawset(_G, '__PM_S__', {god=false, onehit=false, speed=1})\n"
+        "rawset(_G, '__PM_S__', {god=false, onehit=false})\n"
         "local home = '%s'\n"
         "local st = rawget(_G, '__PM_S__')\n"
         "local frame = 0\n"
@@ -396,9 +394,7 @@ static void install_beat(void) {
         "        elseif line:find('onehit=2', 1, true) then st.onehit = 2\n"
         "        elseif line:find('onehit=1', 1, true) then st.onehit = 1\n"
         "        elseif line:find('onehit=0', 1, true) then st.onehit = false\n"
-        "        elseif line:find('speed=3', 1, true) then st.speed = 3\n"
-        "        elseif line:find('speed=1', 1, true) then st.speed = 1\n"
-        "        end\n"
+                "        end\n"
         "      end\n"
         "      ff:close()\n"
         "    end\n"
@@ -409,18 +405,7 @@ static void install_beat(void) {
         "    local UC = ed and ed.UnitComponent\n"
         "    if UC then\n"
         "      rawset(_G, '__PM_H__', true)\n"
-        "      local BE = ed.BattleEngine\n"
-        "      if BE and not rawget(_G, '__PM_SP__') and BE.GetTimeScale then\n"
-        "        rawset(_G, '__PM_SP__', true)\n"
-        "        local oldGTS = BE.GetTimeScale\n"
-        "        BE.GetTimeScale = function(self)\n"
-        "          local ts = oldGTS(self)\n"
-        "          local s2 = rawget(_G, '__PM_S__')\n"
-        "          if s2 and s2.speed and s2.speed > 1 then return ts * s2.speed end\n"
-        "          return ts\n"
-        "        end\n"
-        "      end\n"
-        "      local oldTD = UC.TakeDamage\n"
+                "      local oldTD = UC.TakeDamage\n"
         "      if oldTD then\n"
         "        UC.TakeDamage = function(self, dmg, ...)\n"
         "          local s = rawget(_G, '__PM_S__')\n"
@@ -548,8 +533,8 @@ static void pm_write_flags(void) {
     snprintf(path, sizeof(path), "%s/Documents/pm.flags", p ? p : "/var/mobile");
     FILE* f = fopen(path, "w");
     if (f) {
-        fprintf(f, "god=%d\nonehit=%d\nspeed=%d\n",
-                (int)f_godmode, (int)f_onehit, f_speed ? 3 : 1);
+        fprintf(f, "god=%d\nonehit=%d\n",
+                (int)f_godmode, (int)f_onehit);
         fclose(f);
     }
 }
@@ -559,6 +544,7 @@ static void pm_write_flags(void) {
 @end
 static UIWindow *fg_keyWindow(void);
 static FloatGlassPanel *g_panel = nil;
+static UIView *g_tipOverlay = nil;   // 打赏弹窗遮罩
 
 #pragma mark - 运行时黑名单（银行 / 带检测的 App 不显示）
 
@@ -591,7 +577,6 @@ static BOOL fg_shouldSkip(NSString *bid) {
 
 static NSString *pm_godText(void)    { return f_godmode ? @"无敌 · 开" : @"无敌 · 关"; }
 static NSString *pm_hitText(void)    { return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关"); }
-static NSString *pm_spdText(void)    { return f_speed ? @"加速 · 3x" : @"加速 · 关"; }
 static NSString *pm_engineText(void) {
     if (!g_uf)  return @"引擎 · 等待游戏加载";
     if (!g_L)   return @"引擎 · Lua 连接中";
@@ -629,6 +614,29 @@ static NSString *pm_engineText(void) {
         bv.frame = _glassView.bounds;
         bv.userInteractionEnabled = NO;
         [_glassView addSubview:bv];
+
+        // 用户图标（内嵌 JPEG，圆形裁剪，呼吸高光之下）
+        {
+            NSData *bd = [NSData dataWithBytes:PM_RES_BALL length:PM_RES_BALL_LEN];
+            UIImage *bimg = [UIImage imageWithData:bd];
+            if (bimg) {
+                UIImageView *biv = [[UIImageView alloc] initWithFrame:_glassView.bounds];
+                biv.image = bimg;
+                biv.contentMode = UIViewContentModeScaleAspectFill;
+                biv.layer.cornerRadius = size / 2.0;
+                biv.clipsToBounds = YES;
+                biv.userInteractionEnabled = NO;
+                [_glassView addSubview:biv];
+            } else {
+                UILabel *bl = [[UILabel alloc] initWithFrame:_glassView.bounds];
+                bl.text = @"PM";
+                bl.textAlignment = NSTextAlignmentCenter;
+                bl.textColor = [UIColor whiteColor];
+                bl.font = [UIFont boldSystemFontOfSize:16];
+                bl.userInteractionEnabled = NO;
+                [_glassView addSubview:bl];
+            }
+        }
 
         // 液态高光：顶部柔光呼吸
         CAGradientLayer *sheen = [CAGradientLayer layer];
@@ -722,7 +730,7 @@ static NSString *pm_engineText(void) {
 @implementation FloatGlassPanel {
     UIButton *_godBtn;
     UIButton *_hitBtn;
-    UIButton *_spdBtn;
+    UIButton *_tipBtn;
     UILabel  *_engLabel;
     NSTimer  *_refreshTimer;
 }
@@ -768,13 +776,13 @@ static NSString *pm_engineText(void) {
         title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         [self addSubview:title];
 
-        // ── 三个功能开关（状态即时反映在标题上）──
+        // ── 功能开关（无敌/秒杀）+ 打赏 ──
         _godBtn = [self pm_mkSwitch:CGRectMake(16, 56, 248, 46) title:pm_godText() action:@selector(pm_godTap:)];
         _hitBtn = [self pm_mkSwitch:CGRectMake(16, 110, 248, 46) title:pm_hitText() action:@selector(pm_hitTap:)];
-        _spdBtn = [self pm_mkSwitch:CGRectMake(16, 164, 248, 46) title:pm_spdText() action:@selector(pm_spdTap:)];
+        _tipBtn = [self pm_mkTipButton:CGRectMake(16, 164, 248, 46)];
 
         // 引擎状态行
-        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 222, 248, 34)];
+        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 226, 248, 34)];
         _engLabel.text = pm_engineText();
         _engLabel.textAlignment = NSTextAlignmentCenter;
         _engLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
@@ -805,6 +813,85 @@ static NSString *pm_engineText(void) {
 }
 
 // 玻璃风格开关按钮
+- (UIButton *)pm_mkTipButton:(CGRect)frame {
+    // 打赏按钮：暖色调玻璃风
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.frame = frame;
+    b.layer.cornerRadius = 14;
+    b.layer.borderWidth  = 1.0 / [UIScreen mainScreen].scale;
+    b.layer.borderColor  = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+    b.backgroundColor    = [UIColor colorWithRed:0.98 green:0.75 blue:0.30 alpha:0.30];
+    b.tintColor = [UIColor whiteColor];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    [b setTitle:@"❤️ 打赏作者" forState:UIControlStateNormal];
+    [b addTarget:self action:@selector(pm_tipTap:) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:b];
+    return b;
+}
+
+// 打赏弹窗：全屏遮罩 + 居中二维码图 + 点任意处关闭
+- (void)pm_showTipImage {
+    if (g_tipOverlay) return;   // 已打开
+    UIWindow *kw = fg_keyWindow();
+    if (!kw) return;
+
+    // 解码内嵌 JPEG
+    NSData *jd = [NSData dataWithBytes:PM_RES_TIP length:PM_RES_TIP_LEN];
+    UIImage *img = [UIImage imageWithData:jd];
+    if (!img) { LOG("tip: image decode fail\n"); return; }
+
+    UIView *mask = [[UIView alloc] initWithFrame:kw.bounds];
+    mask.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+    mask.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    // 容器（白底圆角卡片，保留二维码完整性——不加遮罩变形）
+    CGFloat iside = MIN(kw.bounds.size.width, kw.bounds.size.height) * 0.72;
+    UIView *card = [[UIView alloc] initWithFrame:CGRectMake((kw.bounds.size.width - iside) / 2.0,
+                                                             (kw.bounds.size.height - iside - 60) / 2.0,
+                                                             iside, iside + 60)];
+    card.backgroundColor = [UIColor whiteColor];
+    card.layer.cornerRadius = 22;
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.5;
+    card.layer.shadowRadius = 24;
+    card.layer.shadowOffset = CGSizeMake(0, 10);
+
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(16, 16, iside - 32, iside - 32)];
+    iv.image = img;
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    [card addSubview:iv];
+
+    UILabel *cap = [[UILabel alloc] initWithFrame:CGRectMake(0, iside - 6, iside, 34)];
+    cap.text = @"打赏作者 · 点任意处关闭";
+    cap.textAlignment = NSTextAlignmentCenter;
+    cap.textColor = [UIColor darkGrayColor];
+    cap.font = [UIFont boldSystemFontOfSize:14];
+    [card addSubview:cap];
+
+    [mask addSubview:card];
+    [kw addSubview:mask];
+    [kw bringSubviewToFront:mask];
+
+    UITapGestureRecognizer *dt = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(pm_dismissTip:)];
+    [mask addGestureRecognizer:dt];
+    [mask setUserInteractionEnabled:YES];
+
+    // 淡入
+    mask.alpha = 0;
+    [UIView animateWithDuration:0.25 animations:^{ mask.alpha = 1; }];
+    g_tipOverlay = mask;
+    LOG("tip: overlay shown\n");
+}
+
+- (void)pm_dismissTip:(UITapGestureRecognizer *)g {
+    (void)g;
+    UIView *m = g_tipOverlay;
+    g_tipOverlay = nil;
+    [UIView animateWithDuration:0.2 animations:^{ m.alpha = 0; }
+                     completion:^(BOOL f) { [m removeFromSuperview]; (void)f; }];
+    LOG("tip: overlay dismissed\n");
+}
+
 - (UIButton *)pm_mkSwitch:(CGRect)frame title:(NSString *)t action:(SEL)a {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = frame;
@@ -838,19 +925,16 @@ static NSString *pm_engineText(void) {
     LOG("ui: onehit=%d\n", (int)f_onehit);
 }
 
-- (void)pm_spdTap:(id)sender {
+- (void)pm_tipTap:(id)sender {
     (void)sender;
-    f_speed = !f_speed;
-    pm_write_flags();
-    [_spdBtn setTitle:pm_spdText() forState:UIControlStateNormal];
-    LOG("ui: speed=%d\n", (int)f_speed);
+    LOG("ui: tip tap\n");
+    [self pm_showTipImage];
 }
 
 - (void)pm_refresh {
     _engLabel.text = pm_engineText();
     [_godBtn setTitle:pm_godText() forState:UIControlStateNormal];
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
-    [_spdBtn setTitle:pm_spdText() forState:UIControlStateNormal];
 }
 
 - (void)fg_close {
@@ -952,7 +1036,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v6 pid=%d\n", getpid());
+        LOG("PMGlass v7 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
