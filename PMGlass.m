@@ -268,7 +268,27 @@ static void install_beat(void) {
     }
     int rc = lua_dostring(rs);
     LOG("beat install rc=%d\n", rc);
-    g_beat_ok = (rc == 0);
+    if (rc != 0) { g_beat_ok = 0; return; }
+
+    // v5 关键修复：rc=0 ≠ 成功！
+    // 脚本在 Lua 刚出现（启动后 ~2s）就跑，那时 UpdateBeat 全局还不存在，
+    // "if ub and ub.Add" 静默跳过 → 无回调无自愈（v4 实测 pulls=0）。
+    // 成功标准 = 脚本写回的 pm.status 里 reg=OK（真挂上了 UpdateBeat）
+    const char* homeC2 = getenv("HOME");
+    char spath[512];
+    snprintf(spath, sizeof(spath), "%s/Documents/pm.status", homeC2 ? homeC2 : "/var/mobile");
+    FILE* sf = fopen(spath, "r");
+    if (sf) {
+        char buf[64] = {0};
+        size_t n = fread(buf, 1, sizeof(buf) - 1, sf);
+        fclose(sf);
+        buf[n] = 0;
+        g_beat_ok = (strncmp(buf, "reg=OK", 6) == 0) ? 1 : 0;
+    } else {
+        g_beat_ok = 0;
+    }
+    LOG("beat verified=%d (status: %s)\n", (int)g_beat_ok,
+        (sf || 1) ? (g_beat_ok ? "reg=OK" : "reg missing/FAIL") : "?");
 }
 
 // ── v2 引擎装载（全部主线程：dispatch_after 链式重试，零 worker 线程）──
@@ -283,12 +303,31 @@ static void pm_engine_tick(void) {
     // 每 tick（0.5s）检查：引擎就绪了吗？
     if (!g_L || !g_beat_ok) {
         // 还没装好：探测（主线程安全）+ 安装（主线程安全）
+        // v5：install 失败/未验证（UpdateBeat 未出现 → reg=FAIL）时每 4 tick 重试
         if (!g_uf) find_uf();
         if (g_uf) resolve_syms();
         if (g_uf && !g_L) try_get_lua();
-        if (g_L && !g_beat_ok) install_beat();
+        static int inst_ctr = 0;
+        if (g_L && ++inst_ctr >= 4) {   // 每 2s 一次（幂等，重装无副作用）
+            inst_ctr = 0;
+            install_beat();
+        }
         if (ticks % 40 == 0) LOG("probe t=%d uf=%s L=%s beat=%d\n", ticks, g_uf?"ok":"-", g_L?"ok":"-", (int)g_beat_ok);
     } else {
+        // v5 看门狗：装上 90s 仍无帧回调（pulls=0，VM 真死了）→ 重装
+        // （vm 死但 "return 1" 还能过的极端情况：UpdateBeat 已死/重建）
+        static time_t installed_at = 0;
+        static time_t last_pull = 0;
+        if (installed_at == 0) installed_at = time(NULL);
+        if (g_state_pulls > 0 && g_state_pulls != (int)last_pull) {
+            last_pull = g_state_pulls;
+            installed_at = time(NULL);
+        }
+        if (time(NULL) - installed_at > 90) {
+            LOG("watchdog: pulls stale (%d) -> reinstall\n", (int)g_state_pulls);
+            g_beat_ok = 0; installed_at = 0; last_pull = 0;
+            install_beat();
+        }
         // 已装好：每 60 tick（30s）ping 自愈（主线程 pcall = 与游戏串行 = 安全）
         static int ping_ctr = 0;
         if (++ping_ctr >= 60) {
@@ -720,7 +759,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v4 pid=%d\n", getpid());
+        LOG("PMGlass v5 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
