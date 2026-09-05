@@ -129,6 +129,14 @@ jobs:
             -framework Foundation -framework UIKit \
             -o TTSProbe_v12.dylib \
             TTSProbe_v12.m
+      - name: Build TTSProbe v13 dylib (userData dump)
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
+            -fobjc-arc \
+            -dynamiclib \
+            -framework Foundation -framework UIKit \
+            -o TTSProbe_v13.dylib \
+            TTSProbe_v13.m
 
       - name: Sign with ldid (fake sign)
         run: |
@@ -145,6 +153,7 @@ jobs:
           ldid -S TTSProbe_v11.dylib || true
           ldid -S TTSProbe_v11b.dylib || true
           ldid -S TTSProbe_v12.dylib || true
+          ldid -S TTSProbe_v13.dylib || true
 
       - name: Show result
         run: |
@@ -169,6 +178,7 @@ jobs:
             TTSProbe_v11.dylib
             TTSProbe_v11b.dylib
             TTSProbe_v12.dylib
+            TTSProbe_v13.dylib
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
