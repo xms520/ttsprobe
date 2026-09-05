@@ -21,36 +21,8 @@
 #include <sys/stat.h>
 #include <math.h>
 #include <dispatch/dispatch.h>
-
-typedef struct objc_selector* SEL;
-typedef struct objc_object* id;
-typedef id Class_t;
-typedef void* IMP_t;
-// v45 真相：objc_msgSend 只是转发器，参数/返回值的寄存器通道由【方法的真实签名】决定。
-// UIView.bounds/setFrame: 的真实签名 = CGRect（4 float HFA）→ ARM64 走浮点寄存器 s0-s3（参数 s2-s5）。
-// v8 的 variadic union 传参放 x2/x3（错）、v9 的 union 强转也放 x2/x3（IMP 读 s2-s5 = 残留值
-// → 非确定性崩溃 + bounds 恒 0）。正确 = 显式强转 + 真实 float struct（HFA）→ 与 IMP 一致。
-typedef struct { float x, y; } CGPoint_t;
-typedef struct { float w, h; } CGSize_t;
-typedef struct { CGPoint_t origin; CGSize_t size; } CGRect_t;
-#define CGRect CGRect_t
-#define CGRectMake(x,y,w,h) ((CGRect_t){{(x),(y)},{(w),(h)}})
-extern id objc_getClass(const char*);
-extern SEL sel_registerName(const char*);
-extern id objc_msgSend(id, SEL, ...);
-// v8 关键修复：ARM64 下 struct 参数必须走寄存器 —— variadic 调用会走栈导致崩溃/返回0
-// 所有带 CGRect 的调用一律用显式原型强转
-static void OBJC_SETFRAME(id o, CGRect_t f) {
-    void (*fn)(id, SEL, CGRect_t) = (void(*)(id,SEL,CGRect_t))objc_msgSend;
-    fn(o, sel_registerName("setFrame:"), f);
-}
-static CGRect_t OBJC_BOUNDS(id o) {
-    CGRect_t (*fn)(id, SEL) = (CGRect_t(*)(id,SEL))objc_msgSend;
-    return fn(o, sel_registerName("bounds"));
-}
-extern Class_t objc_allocateClassPair(Class_t, const char*, unsigned long);
-extern void objc_registerClassPair(Class_t);
-extern int class_addMethod(Class_t, SEL, IMP_t, const char*);
+#include <mach/mach.h>
+#include <pthread.h>
 
 typedef struct lua_State lua_State;
 static lua_State* (*L_getstate)(void);
@@ -253,16 +225,7 @@ static void read_flags(void) {
     }
 }
 
-// ---------------- v36 UI：独立于 Lua 的安全诊断/自愈版 ----------------
-// 目标：
-// 1) UI 不再依赖 pm_hooked，避免 Lua 回调/文件门控导致“UI 根本没触发”。
-// 2) 不在注入线程直接操作 UIKit；通过目标游戏 MainThread 的 CFRunLoop 投递。
-// 3) 同时尝试 CFRunLoopGet0 / _CFRunLoopGet0。
-// 4) 兼容 UIScene：不只依赖 UIApplication.keyWindow。
-// 5) UI 每 2 秒自检一次；窗口/场景重建后可重新挂载。
-// 6) 保留 v35 的 CGRect union + 显式 objc_msgSend 原型，避免 ARM64 HFA ABI 问题。
-// 7) 本版本只修复/诊断 UI 调度，不改变已经验证的 Lua/UpdateBeat 逻辑。
-
+// ---------------- runloop 桥（v45 实测配方）----------------
 typedef void* CFLoopRef;
 static CFLoopRef (*p_CFRunLoopGet0)(void*);
 static void (*p_CFRunLoopPerformBlock)(CFLoopRef, const void*, void (^)(void));
@@ -270,40 +233,7 @@ static void (*p_CFRunLoopWakeUp)(CFLoopRef);
 static const void* p_CommonModes;
 static CFLoopRef g_main_runloop = NULL;
 
-typedef int kern_return_t;
-typedef unsigned int mach_msg_type_number_t;
-typedef unsigned int mach_port_t;
-#ifndef MACH_PORT_NULL
-#define MACH_PORT_NULL 0
-#endif
 static mach_port_t g_main_thread_port = MACH_PORT_NULL;
-extern kern_return_t task_threads(mach_port_t, mach_port_t**, mach_msg_type_number_t*);
-typedef unsigned long long vm_address_t;
-typedef unsigned long long vm_size_t;
-extern int vm_deallocate(unsigned int, vm_address_t, vm_size_t);
-extern mach_port_t mach_thread_self(void);
-extern kern_return_t thread_info(mach_port_t, int, void*, mach_msg_type_number_t*);
-extern kern_return_t mach_port_deallocate(mach_port_t, mach_port_t);
-extern mach_port_t mach_task_self(void);
-
-#ifndef THREAD_IDENTIFIER_INFO
-#define THREAD_IDENTIFIER_INFO 4
-#endif
-#ifndef THREAD_IDENTIFIER_INFO_COUNT
-#define THREAD_IDENTIFIER_INFO_COUNT 6
-#endif
-typedef struct {
-    uint64_t thread_id;
-    uint64_t thread_handle;
-    int32_t dispatch_qos;
-    int32_t policy;
-    int32_t run_state;
-    int32_t flags;
-    int32_t suspend_count;
-    int32_t sleep_time;
-    char thread_name[64];
-} PMThreadIdentifierInfo;
-
 static void* g_main_pthread = NULL;
 static int find_named_main_thread(void) {
     mach_port_t *threads = NULL;
@@ -315,8 +245,6 @@ static int find_named_main_thread(void) {
     }
 
     // v37: pthread_from_mach_thread_np + pthread_getname_np 读线程名
-    extern void* pthread_from_mach_thread_np(unsigned int);
-    extern int pthread_getname_np(void*, char*, unsigned long);
     int found = 0;
     // v39: 第一次找不到 MainThread 时，dump 全部线程名（诊断主线程真名）
     int dumped = 0;
