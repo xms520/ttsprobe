@@ -196,12 +196,24 @@ static void InstallRecorderPartObserver(void) {
         char ret = types ? types[0] : 'v';
         if (ret != 'v') { TTLog(@"[part-obs] 返回 %c 非 void，不 hook", ret); return; }
 
-        /* 参数形态未知（6参）——不调用原实现之外的任何东西，只打参数指针+已知标量猜测 */
-        /* 签名大概率: v??@0:8@16 I20 I24 I28 I32 I36 或类似（5标量+1对象）。
-         * block 参数必须精确匹配——保守做法：不 hook，只探签名打印（避免 v11b 崩溃教训）
-         * 真正安全方案：method_exchangeImplementations 不行（还是同签名）。
-         * 决定：先只打 types 日志，由日志决定下版 hook 写法。 */
-        TTLog(@"[part-obs] 签名=%s —— v16 仅记录，待确认参数布局后再 hook", types ? types : "?");
+        /* v17: 签名已确认 v44@0:8@16I24I28I32B36I40（对象+4u32+BOOL）
+         * 按精确布局 hook：block 参数 (id, id, uint32, uint32, uint32, BOOL, uint32)
+         * v11b 崩因是参数个数/类型猜错；这次每参按 types 对齐 */
+        IMP newImp = imp_implementationWithBlock(^(id self, id part,
+                                                   uint32_t offset, uint32_t len,
+                                                   uint32_t endFlag, BOOL forceDelete,
+                                                   uint32_t duration) {
+            @autoreleasepool {
+                NSUInteger plen = 0;
+                if ([part isKindOfClass:[NSData class]]) plen = [part length];
+                TTLog(@"[part] off=%u len=%u end=%u forceDel=%d dur=%u part=%luB",
+                      offset, len, endFlag, forceDelete, duration, (unsigned long)plen);
+            }
+            ((void (*)(id, SEL, id, uint32_t, uint32_t, uint32_t, BOOL, uint32_t))oldImp)
+                (self, sel, part, offset, len, endFlag, forceDelete, duration);
+        });
+        method_setImplementation(m, newImp);
+        TTLog(@"[part-obs] hooked（按精确签名）");
     });
 }
 
