@@ -166,8 +166,9 @@ static void InstallPcmReplaceHook(void) {
                             /* PCM 用完后传静音帧（保持节奏，内容为 TTS 结尾后的静音） */
                         }
                     }
+                    /* 调原实现（传替换后的 passBuffer）——必须在 autoreleasepool 作用域内 */
+                    ((void (*)(id, SEL, id, id))oldImp)(self, sel, passBuffer, userData);
                 }
-                ((void (*)(id, SEL, id, id))oldImp)(self, sel, passBuffer, userData);
             });
             method_setImplementation(m, newImp);
             TTLog(@"[pcm-hook] installed (void)");
