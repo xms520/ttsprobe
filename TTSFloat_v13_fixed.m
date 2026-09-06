@@ -560,6 +560,30 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         } @catch (__unused NSException *e) {}
     }
 
+    /* v13d: 真正的发送入口是 SendOriVoiceMsgWithUserData:（二进制证实的方法）。
+     * prepareSend: 只是 InternalMethod 内部准备——单独调它只会创建气泡
+     * 但不启动上传管线（"一直转圈"的根因）。优先 SendOri，回退 prepareSend。 */
+    SEL sendSel = NSSelectorFromString(@"SendOriVoiceMsgWithUserData:");
+    BOOL usedOri = NO;
+    if ([audioSender respondsToSelector:sendSel]) {
+        Method sm = class_getInstanceMethod([audioSender class], sendSel);
+        const char *enc = sm ? method_getTypeEncoding(sm) : NULL;
+        TTLog(@"[send] SendOriVoiceMsgWithUserData: type=%s", enc ? enc : "?");
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(audioSender, sendSel, userData);
+            usedOri = YES;
+            TTLog(@"[send] SendOriVoiceMsgWithUserData: 已调用");
+        } @catch (NSException *e) {
+            TTLog(@"[send] SendOriVoiceMsgWithUserData: 异常: %@", e);
+        }
+    } else {
+        TTLog(@"[send] SendOriVoiceMsgWithUserData: 不存在，回退 prepareSend:");
+    }
+    if (usedOri) {
+        TTLog(@"[send] SendOri accepted; 上传由微信真实管线处理");
+        return nil;
+    }
+
     SEL ps = NSSelectorFromString(@"prepareSend:");
     if (![audioSender respondsToSelector:ps])
         return @"AudioSender 没有 prepareSend:";
