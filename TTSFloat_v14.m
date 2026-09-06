@@ -178,6 +178,33 @@ static void InstallPcmReplaceHook(void) {
     });
 }
 
+/* ==================== v16: OnRecorderPart 观察器（真正进上传队列的入口） ====================
+ * hook -[AudioSender(AudioRecorderDelegate) OnRecorderPart:Offset:Len:EndFlag:ForceDelete:Duration:]
+ * 真实录音时观察：分片提交的参数序列（对照 TTS 发送时是否也走到这里） */
+static void InstallRecorderPartObserver(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class cls = NSClassFromString(@"AudioSender");
+        if (!cls) { TTLog(@"[part-obs] AudioSender MISS"); return; }
+        SEL sel = NSSelectorFromString(@"OnRecorderPart:Offset:Len:EndFlag:ForceDelete:Duration:");
+        Method m = class_getInstanceMethod(cls, sel);
+        if (!m) { TTLog(@"[part-obs] OnRecorderPart MISS"); return; }
+
+        const char *types = method_getTypeEncoding(m);
+        IMP oldImp = method_getImplementation(m);
+        TTLog(@"[part-obs] OnRecorderPart types=%s", types ? types : "?");
+        char ret = types ? types[0] : 'v';
+        if (ret != 'v') { TTLog(@"[part-obs] 返回 %c 非 void，不 hook", ret); return; }
+
+        /* 参数形态未知（6参）——不调用原实现之外的任何东西，只打参数指针+已知标量猜测 */
+        /* 签名大概率: v??@0:8@16 I20 I24 I28 I32 I36 或类似（5标量+1对象）。
+         * block 参数必须精确匹配——保守做法：不 hook，只探签名打印（避免 v11b 崩溃教训）
+         * 真正安全方案：method_exchangeImplementations 不行（还是同签名）。
+         * 决定：先只打 types 日志，由日志决定下版 hook 写法。 */
+        TTLog(@"[part-obs] 签名=%s —— v16 仅记录，待确认参数布局后再 hook", types ? types : "?");
+    });
+}
+
 /* ==================== TTS API ==================== */
 static NSString *TiaxKey(void) { return K_APIKEY_BUILTIN; }
 
@@ -642,6 +669,7 @@ static void TTSShowBall(void) {
         TTSShowBall();
         InstallPrepareSendCapture();
         InstallPcmReplaceHook();
+        InstallRecorderPartObserver();
     });
 }
 @end
