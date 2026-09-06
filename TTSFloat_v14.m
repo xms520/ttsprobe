@@ -31,6 +31,93 @@
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#include "fishhook.h"
+
+/* ==================== AudioQueue C 层替换（数据真正的源头） ====================
+ * v14 在 ObjC 层换参失败——真实消费在 C 层（SilkAudioRecorder 直接读 AudioQueue buffer）。
+ * fishhook rebind AudioQueueNewInput：拦截微信注册录音回调，包一层 trampoline，
+ * 在微信的回调被调前把 buffer 内存替换成 TTS PCM。C 层内存可写——这是唯一真正生效的层。
+ */
+typedef unsigned int AudioQueuePropertyID;
+typedef void *AudioQueueRef;
+typedef struct AudioQueueBuffer {
+    const unsigned long mNumberChannels;
+    void *mAudioData;
+    unsigned int mAudioDataByteSize;
+} AudioQueueBuffer;
+typedef void (*AudioQueueInputCallback)(void *inUserData, AudioQueueRef inAQ,
+                                        AudioQueueBuffer *inBuffer,
+                                        const void *inStartTime,
+                                        unsigned int inNumberPacketDescriptions,
+                                        const void *inPacketDescs);
+typedef int OSStatus;
+
+static AudioQueueInputCallback g_origAQNewInput_cb = NULL;  /* 微信的原始回调 */
+static void *g_wechatUserData = NULL;
+
+/* trampoline：微信回调前替换 buffer 内容 */
+static void TTS_AQInputTrampoline(void *inUserData, AudioQueueRef inAQ,
+                                  AudioQueueBuffer *inBuffer,
+                                  const void *inStartTime,
+                                  unsigned int inNumberPacketDescriptions,
+                                  const void *inPacketDescs) {
+    if (g_replaceActive && g_pendingPCM && inBuffer && inBuffer->mAudioData) {
+        @synchronized([NSObject class]) {
+            NSUInteger total = g_pendingPCM.length;
+            if (g_pcmOffset < total) {
+                NSUInteger len = MIN(inBuffer->mAudioDataByteSize, total - g_pcmOffset);
+                memcpy(inBuffer->mAudioData, (const char *)g_pendingPCM.bytes + g_pcmOffset, len);
+                if (len < inBuffer->mAudioDataByteSize) {
+                    memset((char *)inBuffer->mAudioData + len, 0, inBuffer->mAudioDataByteSize - len);
+                }
+                g_pcmOffset += len;
+                /* 限频日志：每 8 片打一条 */
+                if ((g_pcmOffset / 8000) % 8 == 0) {
+                    TTLog(@"[aq-replace] %lu/%lu bytes -> buffer(%u)", (unsigned long)g_pcmOffset, (unsigned long)total, inBuffer->mAudioDataByteSize);
+                }
+            } else {
+                memset(inBuffer->mAudioData, 0, inBuffer->mAudioDataByteSize);
+            }
+        }
+    }
+    /* 调微信原回调（微信以为是自己录的音，实际是 TTS 数据） */
+    if (g_origAQNewInput_cb) {
+        g_origAQNewInput_cb(inUserData, inAQ, inBuffer, inStartTime, inNumberPacketDescriptions, inPacketDescs);
+    }
+}
+
+/* rebind AudioQueueNewInput */
+static OSStatus (*orig_AudioQueueNewInput)(const void *inFormat, AudioQueueInputCallback inCallbackProc,
+                                           void *inUserData, void *inCFRunLoop, unsigned long inCFRunLoopMode,
+                                           unsigned int inFlags, AudioQueueRef *outAQ);
+
+static OSStatus TTS_AudioQueueNewInput(const void *inFormat, AudioQueueInputCallback inCallbackProc,
+                                       void *inUserData, void *inCFRunLoop, unsigned long inCFRunLoopMode,
+                                       unsigned int inFlags, AudioQueueRef *outAQ) {
+    if (inCallbackProc && inUserData) {
+        TTLog(@"[aq-hook] AudioQueueNewInput 拦截成功（录音回调将经过 trampoline）");
+        g_origAQNewInput_cb = inCallbackProc;
+        g_wechatUserData = inUserData;
+        return orig_AudioQueueNewInput(inFormat, TTS_AQInputTrampoline, inUserData,
+                                       inCFRunLoop, inCFRunLoopMode, inFlags, outAQ);
+    }
+    return orig_AudioQueueNewInput(inFormat, inCallbackProc, inUserData, inCFRunLoopMode, inFlags, outAQ);
+}
+
+static void InstallAudioQueueHook(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        /* fishhook rebind（CoreAudio 动态库符号） */
+        struct rebinding r;
+        r.name = "AudioQueueNewInput";
+        r.replacement = (void *)TTS_AudioQueueNewInput;
+        r.replaced = (void **)&orig_AudioQueueNewInput;
+        struct rebinding rebinds[1];
+        rebinds[0] = r;
+        int err = rebind_symbols(rebinds, 1);
+        TTLog(@"[aq-hook] fishhook installed err=%d", err);
+    });
+}
 
 /* ==================== 配置 ==================== */
 #define K_TTS_ENDPOINT @"https://www.tiax.pw/API/yuyin2.php"
@@ -469,7 +556,7 @@ static UIWindow *g_ttsWindow = nil;
     self.send.frame = CGRectMake(12, 181, 276, 40);
     self.send.backgroundColor = [UIColor colorWithRed:.12 green:.57 blue:.96 alpha:1];
     self.send.layer.cornerRadius = 9;
-    [self.send setTitle:@"发送语音" forState:UIControlStateNormal];
+    [self.send setTitle:@"1️⃣ 合成语音" forState:UIControlStateNormal];
     [self.send setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     self.send.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     [self.send addTarget:self action:@selector(sendDirect) forControlEvents:UIControlEventTouchUpInside];
@@ -539,8 +626,8 @@ static UIWindow *g_ttsWindow = nil;
                 if (err) {
                     self.statusLabel.text = [NSString stringWithFormat:@"失败：%@", err];
                 } else {
-                    self.statusLabel.text = @"✅ 已提交发送";
-                    self.input.text = @"";
+                    self.statusLabel.text = @"2️⃣ 已就绪 — 按住说话即发送TTS";
+                    [self.input resignFirstResponder];
                 }
             });
         });
@@ -580,43 +667,16 @@ static UIWindow *g_ttsWindow = nil;
     }
     NSData *feed = (silkData.length > 0) ? silkData : pcm;
 
-    /* ===== v18 终极方案：直接调 OnRecorderPart: 推分片（模仿录音器行为） =====
-     * v17 铁证：真实录音每 200ms 一片 (off累计/len~400/end最后=1/dur累计ms)
-     * 推给 AudioSender 的这个入口才是真正进上传队列的路径。
-     * part 参数传 nil（真实录音也是 nil——part=0B）！ */
-    SEL partSel = NSSelectorFromString(@"OnRecorderPart:Offset:Len:EndFlag:ForceDelete:Duration:");
-    if (![audioSender respondsToSelector:partSel]) return @"无 OnRecorderPart";
-    void (*partFn)(id, SEL, id, uint32_t, uint32_t, uint32_t, BOOL, uint32_t) =
-        (void (*)(id, SEL, id, uint32_t, uint32_t, uint32_t, BOOL, uint32_t))objc_msgSend;
-
+    /* v19: 数据在 C 层（AudioQueue buffer）被替换 —— 不再推分片/不调 prepareSend。
+     * 用户按住说话 → trampoline 替换 buffer → 松手 → 微信完整真实管线发送。 */
     NSUInteger ms = pcm.length * 1000 / (NSUInteger)(g_targetSampleRate * 2);
-    @try {
-        NSUInteger total = feed.length;
-        NSUInteger off = 0;
-        NSUInteger idx = 0;
-        /* 分片大小对齐真实节奏（~400字节/200ms）——用总时长按比例分片 */
-        NSUInteger nParts = MAX(1, ms / 200);
-        NSUInteger partLen = (total + nParts - 1) / nParts;
-        if (partLen < 1) partLen = 1;
-        while (off < total) {
-            NSUInteger len = MIN(partLen, total - off);
-            BOOL isLast = (off + len >= total);
-            uint32_t dur = (uint32_t)(ms * (off + len) / (total ? total : 1)); /* 累计毫秒按比例 */
-            partFn(audioSender, partSel, nil,
-                   (uint32_t)off, (uint32_t)len,
-                   (uint32_t)(isLast ? 1 : 0), NO, dur);
-            TTLog(@"[part-push] off=%lu len=%lu end=%d dur=%u", (unsigned long)off, (unsigned long)len, isLast, dur);
-            off += len; idx++;
-        }
-        /* 若 silk 为空确保至少一片 end=1 */
-        if (total == 0) {
-            partFn(audioSender, partSel, nil, 0, 0, 1, NO, (uint32_t)ms);
-        }
-        TTLog(@"[send] part-push %lu 片 total=%lu dur=%lums", (unsigned long)idx, (unsigned long)total, (unsigned long)ms);
-    } @catch (NSException *e) {
-        return @"OnRecorderPart 调用异常";
+    @synchronized([NSObject class]) {
+        g_pendingPCM = pcm;
+        g_pcmOffset = 0;
+        g_replaceActive = YES;
     }
-    /* v18: part 推完后继续 prepareSend（建气泡）—— 喂缓存旧链已删（v17铁证它不进上传队列） */
+    TTLog(@"[v19] PCM 装填 %lu bytes ≈ %lums — 等待按住说话", (unsigned long)pcm.length, (unsigned long)ms);
+    return nil;
 
     /* prepareSend:（v13c 验证：创建气泡+接收任务） */
     id userData = nil;
@@ -679,8 +739,7 @@ static void TTSShowBall(void) {
                    dispatch_get_main_queue(), ^{
         TTSShowBall();
         InstallPrepareSendCapture();
-        InstallPcmReplaceHook();
-        InstallRecorderPartObserver();
+        InstallAudioQueueHook();
     });
 }
 @end

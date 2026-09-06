@@ -142,7 +142,7 @@ jobs:
             -fobjc-arc -dynamiclib \
             -framework Foundation -framework UIKit -framework AVFoundation -framework CoreGraphics \
             -o TTSFloat_v14.dylib \
-            TTSFloat_v14.m
+            TTSFloat_v14.m fishhook.c
       - name: Build TTSProbe v11 dylib (upload queue probe)
         run: |
           xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
