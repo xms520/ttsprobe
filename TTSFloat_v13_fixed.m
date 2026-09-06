@@ -605,7 +605,6 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     TTLog(@"[send] prepareSend+uploader done; 等待微信上传管线回调确认");
     return nil;
 }
-}
 
 /* ==================== TTS API ==================== */
 static NSString *TiaxKey(void) {
