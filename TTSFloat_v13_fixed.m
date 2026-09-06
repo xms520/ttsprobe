@@ -297,6 +297,33 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         @try { codec = [[silkCls alloc] init]; } @catch (__unused NSException *e) {}
         if (!codec) continue;
 
+        /* 关键修复：encodeFromPCMData 返回 nil 的根因 = 编码器未初始化。
+         * 微信真实方法集: initEncoderWithSampleRate: → encodeFromPCMData: → uninitEncoder
+         * 必须先 initEncoderWithSampleRate:(16000) 才能编码！ */
+        SEL initSel = NSSelectorFromString(@"initEncoderWithSampleRate:");
+        if ([codec respondsToSelector:initSel]) {
+            @try {
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(codec, initSel, (NSInteger)g_targetSampleRate);
+                TTLog(@"[silk] initEncoderWithSampleRate:%ld done", (long)g_targetSampleRate);
+            } @catch (NSException *e0) {
+                /* initEncoderWithSampleRate: 可能返回对象而非 void —— 兼容处理 */
+                @try {
+                    ((id (*)(id, SEL, NSInteger))objc_msgSend)(codec, initSel, (NSInteger)g_targetSampleRate);
+                    TTLog(@"[silk] initEncoder(ret-obj) done");
+                } @catch (NSException *e1) {
+                    TTLog(@"[silk] initEncoder 异常: %@", e1);
+                }
+            }
+        } else {
+            SEL initSel2 = NSSelectorFromString(@"initEncoder");
+            if ([codec respondsToSelector:initSel2]) {
+                @try { ((void (*)(id, SEL))objc_msgSend)(codec, initSel2); TTLog(@"[silk] initEncoder done"); }
+                @catch (NSException *e2) { TTLog(@"[silk] initEncoder2 异常: %@", e2); }
+            } else {
+                TTLog(@"[silk] 无 initEncoder 方法");
+            }
+        }
+
         @try {
             id result = ((id (*)(id, SEL, id))objc_msgSend)(codec, silkSel, pcmData);
             if ([result isKindOfClass:[NSData class]] && [result length] > 0) {
