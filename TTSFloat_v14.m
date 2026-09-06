@@ -147,33 +147,27 @@ static void InstallPcmReplaceHook(void) {
             IMP newImp = imp_implementationWithBlock(^(id self, id buffer, id userData) {
                 @autoreleasepool {
                     if (g_replaceActive && g_pendingPCM) {
-                        @synchronized([NSObject class]) {
+                        id passBuffer = buffer;
+                @synchronized([NSObject class]) {
                             NSUInteger total = g_pendingPCM.length;
                             if (g_pcmOffset < total) {
                                 NSUInteger len = 8000;
                                 if (g_pcmOffset + len > total) len = total - g_pcmOffset;
+                                /* 不可变 NSData(_NSInlineData) 无法原地改 — 直接给原实现传我们的分片 */
                                 NSData *seg = [g_pendingPCM subdataWithRange:NSMakeRange(g_pcmOffset, len)];
                                 g_pcmOffset += len;
-                                if ([buffer isKindOfClass:[NSMutableData class]]) {
-                                    NSMutableData *md = (NSMutableData *)buffer;
-                                    [md setLength:0];
-                                    [md appendData:seg];
-                                    TTLog(@"[pcm-replace] 替换帧 %lu bytes (off=%lu/%lu)",
-                                        (unsigned long)seg.length, (unsigned long)g_pcmOffset, (unsigned long)total);
-                                } else if ([buffer isKindOfClass:[NSData class]]) {
-                                    TTLog(@"[pcm-replace] immutable NSData len=%lu — 无法原地替换(记录类型: %@)",
-                                        (unsigned long)[buffer length], NSStringFromClass([buffer class]));
-                                } else {
-                                    TTLog(@"[pcm-replace] buffer 类型=%@ — 探测其字段",
-                                        NSStringFromClass([buffer class]));
+                                passBuffer = seg;
+                                if (g_pcmOffset % 24000 < 8000) { /* 限频日志 */
+                                    TTLog(@"[pcm-replace] 换参帧 %lu bytes (off=%lu/%lu) mic=%lu",
+                                        (unsigned long)seg.length, (unsigned long)g_pcmOffset, (unsigned long)total,
+                                        (unsigned long)[buffer length]);
                                 }
-                            } else {
-                                TTLog(@"[pcm-replace] PCM 用完 (off=%lu)", (unsigned long)g_pcmOffset);
                             }
+                            /* PCM 用完后传静音帧（保持节奏，内容为 TTS 结尾后的静音） */
                         }
                     }
                 }
-                ((void (*)(id, SEL, id, id))oldImp)(self, sel, buffer, userData);
+                ((void (*)(id, SEL, id, id))oldImp)(self, sel, passBuffer, userData);
             });
             method_setImplementation(m, newImp);
             TTLog(@"[pcm-hook] installed (void)");
@@ -502,7 +496,9 @@ static UIWindow *g_ttsWindow = nil;
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.send.enabled = YES;
                 [self.spinner stopAnimating];
-                self.statusLabel.text = [NSString stringWithFormat:@"2️⃣ 已就绪 %lus — 按住说话即发送", (unsigned long)(ms / 1000)];
+                /* 收起键盘 — 让用户能按微信的"按住说话"键 */
+                [self.input resignFirstResponder];
+                self.statusLabel.text = [NSString stringWithFormat:@"2️⃣ 已就绪 %lus — 按住说话", (unsigned long)(ms / 1000)];
             });
         });
     });
