@@ -84,11 +84,10 @@ static NSString *g_voiceName = K_DEFAULT_VOICE;
 static NSData *g_pendingPCM = nil;       /* TTS 合成的完整 PCM */
 static NSUInteger g_pcmOffset = 0;       /* 已喂位置 */
 static BOOL g_replaceActive = NO;        /* 替换开关 */
-static NSString *g_voiceName = K_DEFAULT_VOICE;
-
 
 /* ==================== AudioQueue C 层替换（数据真正的源头） ==================== */
-/* TTS PCM 缓存（C 层 trampoline 消费） */
+static AudioQueueInputCallback g_origAQNewInput_cb = NULL;  /* 微信的原始回调 */
+static void *g_wechatUserData = NULL;
 
 /* trampoline：微信回调前替换 buffer 内容（官方 AudioToolbox 类型） */
 static void TTS_AQInputTrampoline(void *inUserData, AudioQueueRef inAQ,
@@ -140,7 +139,7 @@ static OSStatus TTS_AudioQueueNewInput(const AudioStreamBasicDescription *inForm
         return orig_AudioQueueNewInput(inFormat, TTS_AQInputTrampoline, inUserData,
                                        inCFRunLoop, inCFRunLoopMode, inFlags, outAQ);
     }
-    return orig_AudioQueueNewInput(inFormat, inCallbackProc, inUserData, inCFRunLoopMode, inFlags, outAQ);
+    return orig_AudioQueueNewInput(inFormat, inCallbackProc, inUserData, inCFRunLoop, inCFRunLoopMode, inFlags, outAQ);
 }
 
 static void InstallAudioQueueHook(void) {
