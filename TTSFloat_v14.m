@@ -580,44 +580,43 @@ static UIWindow *g_ttsWindow = nil;
     }
     NSData *feed = (silkData.length > 0) ? silkData : pcm;
 
-    /* logic 喂入（v13c 验证：queueItem 双参 + 末帧 endflag + 空帧） */
-    id logic = nil;
-    @try { logic = [audioSender valueForKey:@"transcacheLogic"]; } @catch (NSException *e) { }
-    if (!logic) return @"拿不到 transcacheLogic";
+    /* ===== v18 终极方案：直接调 OnRecorderPart: 推分片（模仿录音器行为） =====
+     * v17 铁证：真实录音每 200ms 一片 (off累计/len~400/end最后=1/dur累计ms)
+     * 推给 AudioSender 的这个入口才是真正进上传队列的路径。
+     * part 参数传 nil（真实录音也是 nil——part=0B）！ */
+    SEL partSel = NSSelectorFromString(@"OnRecorderPart:Offset:Len:EndFlag:ForceDelete:Duration:");
+    if (![audioSender respondsToSelector:partSel]) return @"无 OnRecorderPart";
+    void (*partFn)(id, SEL, id, uint32_t, uint32_t, uint32_t, BOOL, uint32_t) =
+        (void (*)(id, SEL, id, uint32_t, uint32_t, uint32_t, BOOL, uint32_t))objc_msgSend;
 
-    SEL pvd = NSSelectorFromString(@"processVoiceData:");
-    SEL pvdq = NSSelectorFromString(@"processVoiceData:queueItem:");
-    SEL epd = NSSelectorFromString(@"endProcessVoiceData");
-    Class itemCls = NSClassFromString(@"StreamInputQueueItem");
-
+    NSUInteger ms = pcm.length * 1000 / (NSUInteger)(g_targetSampleRate * 2);
     @try {
-        NSUInteger CHUNK = 8000, total = feed.length, off = 0, seq = 0;
+        NSUInteger total = feed.length;
+        NSUInteger off = 0;
+        NSUInteger idx = 0;
+        /* 分片大小对齐真实节奏（~400字节/200ms）——用总时长按比例分片 */
+        NSUInteger nParts = MAX(1, ms / 200);
+        NSUInteger partLen = (total + nParts - 1) / nParts;
+        if (partLen < 1) partLen = 1;
         while (off < total) {
-            NSUInteger len = MIN(CHUNK, total - off);
-            BOOL last = (off + len >= total);
-            NSData *piece = [feed subdataWithRange:NSMakeRange(off, len)];
-            ((void (*)(id, SEL, id))objc_msgSend)(logic, pvd, piece);
-            if (itemCls) {
-                id item = [[itemCls alloc] init];
-                @try { [item setValue:@(last ? 1 : 0) forKey:@"_endFlag"]; }
-                @catch (NSException *e2) { @try { [item setValue:@(last ? 1 : 0) forKey:@"endFlag"]; } @catch (NSException *e3) {} }
-                ((void (*)(id, SEL, id, id))objc_msgSend)(logic, pvdq, piece, item);
-            }
-            off += len; seq++;
+            NSUInteger len = MIN(partLen, total - off);
+            BOOL isLast = (off + len >= total);
+            uint32_t dur = (uint32_t)(ms * (off + len) / (total ? total : 1)); /* 累计毫秒按比例 */
+            partFn(audioSender, partSel, nil,
+                   (uint32_t)off, (uint32_t)len,
+                   (uint32_t)(isLast ? 1 : 0), NO, dur);
+            TTLog(@"[part-push] off=%lu len=%lu end=%d dur=%u", (unsigned long)off, (unsigned long)len, isLast, dur);
+            off += len; idx++;
         }
-        if (itemCls) {
-            id item = [[itemCls alloc] init];
-            @try { [item setValue:@1 forKey:@"_endFlag"]; }
-            @catch (NSException *e2) { @try { [item setValue:@1 forKey:@"endFlag"]; } @catch (NSException *e3) {} }
-            ((void (*)(id, SEL, id, id))objc_msgSend)(logic, pvdq, nil, item);
+        /* 若 silk 为空确保至少一片 end=1 */
+        if (total == 0) {
+            partFn(audioSender, partSel, nil, 0, 0, 1, NO, (uint32_t)ms);
         }
-        TTLog(@"[send] fed %lu bytes %lu chunks", (unsigned long)total, (unsigned long)seq);
-    } @catch (NSException *e) { return @"喂入异常"; }
-
-    @try {
-        ((void (*)(id, SEL))objc_msgSend)(logic, epd);
-        TTLog(@"[send] endProcess done");
-    } @catch (NSException *e) { }
+        TTLog(@"[send] part-push %lu 片 total=%lu dur=%lums", (unsigned long)idx, (unsigned long)total, (unsigned long)ms);
+    } @catch (NSException *e) {
+        return @"OnRecorderPart 调用异常";
+    }
+    /* v18: part 推完后继续 prepareSend（建气泡）—— 喂缓存旧链已删（v17铁证它不进上传队列） */
 
     /* prepareSend:（v13c 验证：创建气泡+接收任务） */
     id userData = nil;
