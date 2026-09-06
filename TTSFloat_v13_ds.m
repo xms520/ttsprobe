@@ -321,31 +321,12 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         NSUInteger nargs = sm ? method_getNumberOfArguments(sm) : 0;
         TTLog(@"[rec] StartRecordFrom 真实签名: type=%s args=%lu", enc ? enc : "?", (unsigned long)nargs);
 
-        /* 按真实参数个数分派调用（arm64: 对象/标量寄存器不同，签名错=崩） */
-        @try {
-            if (nargs == 5 && enc && enc[0] == 'B') {
-                BOOL (*fn)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))objc_msgSend;
-                recording = fn(audioSender0, startSel, chatVC, toUsr, nil);
-            } else if (nargs == 5 && enc && enc[0] == 'v') {
-                void (*fn)(id, SEL, id, id, id) = (void (*)(id, SEL, id, id, id))objc_msgSend;
-                fn(audioSender0, startSel, chatVC, toUsr, nil);
-                recording = YES;
-            } else if (nargs == 4 && enc && enc[0] == 'B') {
-                BOOL (*fn)(id, SEL, id, id) = (BOOL (*)(id, SEL, id, id))objc_msgSend;
-                recording = fn(audioSender0, startSel, chatVC, toUsr);
-            } else if (nargs == 4 && enc && enc[0] == 'v') {
-                void (*fn)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
-                fn(audioSender0, startSel, chatVC, toUsr);
-                recording = YES;
-            } else {
-                TTLog(@"[rec] 未识别的签名形态（nargs=%lu ret=%c）——不调用",
-                      (unsigned long)nargs, enc ? enc[0] : '?');
-            }
-            TTLog(@"[rec] StartRecordFrom ret=%d", recording);
-        } @catch (NSException *e) {
-            TTLog(@"[rec] StartRecordFrom 异常: %@", e);
-        }
+        /* 签名已确认 B40@0:8@16@24@32 —— 但参数真实身份未知（传 chatVC 崩）。
+         * 假录音路暂停：不再实际调用，只打印签名。走缓存喂入路径。 */
+        TTLog(@"[rec] 签名=B40@0:8@16@24@32（3对象参）——身份未确认，跳过实际调用");
+        (void)nargs; (void)enc;
     }
+    recording = NO;
     if (!recording) {
         TTLog(@"[rec] 录音会话未启动，继续走缓存喂入路径（但可能会转圈）");
         // 注意：即使 recording==NO，我们仍然可以尝试喂数据，但后续 StopRecord 不应调用
