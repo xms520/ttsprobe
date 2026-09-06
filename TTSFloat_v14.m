@@ -146,8 +146,8 @@ static void InstallPcmReplaceHook(void) {
             }
             IMP newImp = imp_implementationWithBlock(^(id self, id buffer, id userData) {
                 @autoreleasepool {
+                    id passBuffer = buffer;   /* 传给原实现的参数（可能被替换成 TTS 分片） */
                     if (g_replaceActive && g_pendingPCM) {
-                        id passBuffer = buffer;
                 @synchronized([NSObject class]) {
                             NSUInteger total = g_pendingPCM.length;
                             if (g_pcmOffset < total) {
