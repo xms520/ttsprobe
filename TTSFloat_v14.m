@@ -85,6 +85,46 @@ static NSData *g_pendingPCM = nil;       /* TTS 合成的完整 PCM */
 static NSUInteger g_pcmOffset = 0;       /* 已喂位置 */
 static BOOL g_replaceActive = NO;        /* 替换开关 */
 
+/* ==================== v20: 录音启动参数捕获（面板直接发送的关键） ====================
+ * StartRecordFrom:ToUser:UserInfo: 真实签名 B40@0:8@16@24@32（3个无类名对象参）。
+ * 传 chatVC 崩（身份不对）。hook 它【只观察不修改】——用户按住说话一次，
+ * 日志打出三个参数的真实类名+描述，就知道面板发送该传什么。单参观察 hook 安全。 */
+static id g_lastFromParam = nil;
+static id g_lastUserInfoParam = nil;
+
+static void InstallStartRecordObserver(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class cls = NSClassFromString(@"AudioSender");
+        if (!cls) return;
+        SEL sel = NSSelectorFromString(@"StartRecordFrom:ToUser:UserInfo:");
+        Method m = class_getInstanceMethod(cls, sel);
+        if (!m) { TTLog(@"[obs] StartRecordFrom MISS"); return; }
+        const char *types = method_getTypeEncoding(m);
+        TTLog(@"[obs] StartRecordFrom types=%s", types ? types : "?");
+        IMP oldImp = method_getImplementation(m);
+        IMP newImp = imp_implementationWithBlock(^BOOL(id self, id from, id toUser, id userInfo) {
+            @autoreleasepool {
+                TTLog(@"[obs] StartRecordFrom: from=%@(%@) toUser=%@(%@) userInfo=%@",
+                      from ? NSStringFromClass([from class]) : @"nil",
+                      from ? [from description] : @"-",
+                      toUser ? NSStringFromClass([toUser class]) : @"nil",
+                      toUser ? [toUser description] : @"-",
+                      userInfo ? NSStringFromClass([userInfo class]) : @"nil");
+                @synchronized([NSObject class]) {
+                    g_lastFromParam = from;
+                    g_lastUserInfoParam = userInfo;
+                }
+            }
+            return ((BOOL (*)(id, SEL, id, id, id))oldImp)(self, sel, from, toUser, userInfo);
+        });
+        method_setImplementation(m, newImp);
+        TTLog(@"[obs] StartRecordFrom observer installed");
+    });
+}
+
+/* ==================== AudioQueue C 层替换（数据真正的源头） ==================== */
+
 /* ==================== AudioQueue C 层替换（数据真正的源头） ==================== */
 static AudioQueueInputCallback g_origAQNewInput_cb = NULL;  /* 微信的原始回调 */
 static void *g_wechatUserData = NULL;
@@ -731,6 +771,7 @@ static void TTSShowBall(void) {
                    dispatch_get_main_queue(), ^{
         TTSShowBall();
         InstallPrepareSendCapture();
+        InstallStartRecordObserver();
         InstallAudioQueueHook();
     });
 }
