@@ -327,6 +327,8 @@ static UIWindow *g_ttsWindow = nil;
 @property (nonatomic) NSInteger voiceIndex;
 - (void)kbWillShow:(NSNotification *)n;
 - (void)kbWillHide:(NSNotification *)n;
+- (void)sendDirect;
+- (NSString *)sendVoiceToWeChat:(NSData *)pcm toUsr:(NSString *)toUsr;
 @end
 
 @implementation TTSFloatView
@@ -428,10 +430,10 @@ static UIWindow *g_ttsWindow = nil;
     self.send.frame = CGRectMake(12, 181, 276, 40);
     self.send.backgroundColor = [UIColor colorWithRed:.12 green:.57 blue:.96 alpha:1];
     self.send.layer.cornerRadius = 9;
-    [self.send setTitle:@"1️⃣ 合成语音" forState:UIControlStateNormal];
+    [self.send setTitle:@"发送语音" forState:UIControlStateNormal];
     [self.send setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     self.send.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-    [self.send addTarget:self action:@selector(prepareVoice) forControlEvents:UIControlEventTouchUpInside];
+    [self.send addTarget:self action:@selector(sendDirect) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:self.send];
 
     self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 222, 276, 20)];
@@ -470,39 +472,146 @@ static UIWindow *g_ttsWindow = nil;
     });
 }
 
-/* 1️⃣ 合成：TTS → PCM → 装填替换缓存 → 提示按住说话 */
-- (void)prepareVoice {
+/* 面板直接发送（v15）：TTS → PCM → silk(自编码) → v13c 发送链 */
+- (void)sendDirect {
     NSString *text = self.input.text;
     if (!text.length) { self.statusLabel.text = @"请输入文字"; return; }
 
+    NSString *peer = nil;
+    @synchronized([NSObject class]) { peer = [g_lastToUsr copy]; }
+    if (!peer.length) { self.statusLabel.text = @"先按住说话一次（捕获会话）"; return; }
+
     self.send.enabled = NO;
-    self.statusLabel.text = @"正在合成…";
+    self.statusLabel.text = @"合成发送中…";
     [self.spinner startAnimating];
+    [self.input resignFirstResponder];
     NSString *voice = g_voiceName ? g_voiceName : K_DEFAULT_VOICE;
 
     RequestTTS(text, voice, ^(NSData *audio, NSError *error) {
-        if (error) { [self setStatusOnMain:[NSString stringWithFormat:@"合成失败：%@", error.localizedDescription]]; return; }
+        if (error) { [self setStatusOnMain:[NSString stringWithFormat:@"失败：%@", error.localizedDescription]]; return; }
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSData *pcm = DecodeToPCM(audio);
             if (!pcm) { [self setStatusOnMain:@"PCM解码失败"]; return; }
 
-            /* 装填替换缓存 */
-            @synchronized([NSObject class]) {
-                g_pendingPCM = pcm;
-                g_pcmOffset = 0;
-                g_replaceActive = YES;
-            }
-            NSUInteger ms = pcm.length * 1000 / (NSUInteger)(g_targetSampleRate * 2);
-            TTLog(@"[v14] PCM 装填完成 %lu bytes ≈ %lu ms — 等待用户按住说话", (unsigned long)pcm.length, (unsigned long)ms);
+            NSString *err = [self sendVoiceToWeChat:pcm toUsr:peer];
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.send.enabled = YES;
                 [self.spinner stopAnimating];
-                /* 收起键盘 — 让用户能按微信的"按住说话"键 */
-                [self.input resignFirstResponder];
-                self.statusLabel.text = [NSString stringWithFormat:@"2️⃣ 已就绪 %lus — 按住说话", (unsigned long)(ms / 1000)];
+                if (err) {
+                    self.statusLabel.text = [NSString stringWithFormat:@"失败：%@", err];
+                } else {
+                    self.statusLabel.text = @"✅ 已提交发送";
+                    self.input.text = @"";
+                }
             });
         });
     });
+}
+
+/* ===== v13c 验证过的发送链（气泡+silk 已验证） ===== */
+- (NSString *)sendVoiceToWeChat:(NSData *)pcm toUsr:(NSString *)toUsr {
+    if (!pcm.length || !toUsr.length) return @"数据为空";
+
+    id audioSender = nil;
+    @synchronized([NSObject class]) { audioSender = g_audioSender; }
+    if (!audioSender) return @"拿不到 AudioSender";
+
+    /* silk 自编码（v13c 验证：initEncoder → encodeFromPCMData） */
+    Class silkCls = NSClassFromString(@"MJSilkCodec");
+    NSData *silkData = nil;
+    if (silkCls) {
+        id codec = [[silkCls alloc] init];
+        SEL initSel = NSSelectorFromString(@"initEncoderWithSampleRate:");
+        if ([codec respondsToSelector:initSel]) {
+            @try {
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(codec, initSel, (NSInteger)g_targetSampleRate);
+                TTLog(@"[silk] initEncoder done");
+            } @catch (NSException *e) { }
+        }
+        SEL encSel = NSSelectorFromString(@"encodeFromPCMData:");
+        if ([codec respondsToSelector:encSel]) {
+            @try {
+                id r = ((id (*)(id, SEL, id))objc_msgSend)(codec, encSel, pcm);
+                if ([r isKindOfClass:[NSData class]] && [r length] > 0) {
+                    silkData = r;
+                    TTLog(@"[silk] encoded %lu -> %lu bytes", (unsigned long)pcm.length, (unsigned long)silkData.length);
+                }
+            } @catch (NSException *e) { TTLog(@"[silk] 异常"); }
+        }
+    }
+    NSData *feed = (silkData.length > 0) ? silkData : pcm;
+
+    /* logic 喂入（v13c 验证：queueItem 双参 + 末帧 endflag + 空帧） */
+    id logic = nil;
+    @try { logic = [audioSender valueForKey:@"transcacheLogic"]; } @catch (NSException *e) { }
+    if (!logic) return @"拿不到 transcacheLogic";
+
+    SEL pvd = NSSelectorFromString(@"processVoiceData:");
+    SEL pvdq = NSSelectorFromString(@"processVoiceData:queueItem:");
+    SEL epd = NSSelectorFromString(@"endProcessVoiceData");
+    Class itemCls = NSClassFromString(@"StreamInputQueueItem");
+
+    @try {
+        NSUInteger CHUNK = 8000, total = feed.length, off = 0, seq = 0;
+        while (off < total) {
+            NSUInteger len = MIN(CHUNK, total - off);
+            BOOL last = (off + len >= total);
+            NSData *piece = [feed subdataWithRange:NSMakeRange(off, len)];
+            ((void (*)(id, SEL, id))objc_msgSend)(logic, pvd, piece);
+            if (itemCls) {
+                id item = [[itemCls alloc] init];
+                @try { [item setValue:@(last ? 1 : 0) forKey:@"_endFlag"]; }
+                @catch (NSException *e2) { @try { [item setValue:@(last ? 1 : 0) forKey:@"endFlag"]; } @catch (NSException *e3) {} }
+                ((void (*)(id, SEL, id, id))objc_msgSend)(logic, pvdq, piece, item);
+            }
+            off += len; seq++;
+        }
+        if (itemCls) {
+            id item = [[itemCls alloc] init];
+            @try { [item setValue:@1 forKey:@"_endFlag"]; }
+            @catch (NSException *e2) { @try { [item setValue:@1 forKey:@"endFlag"]; } @catch (NSException *e3) {} }
+            ((void (*)(id, SEL, id, id))objc_msgSend)(logic, pvdq, nil, item);
+        }
+        TTLog(@"[send] fed %lu bytes %lu chunks", (unsigned long)total, (unsigned long)seq);
+    } @catch (NSException *e) { return @"喂入异常"; }
+
+    @try {
+        ((void (*)(id, SEL))objc_msgSend)(logic, epd);
+        TTLog(@"[send] endProcess done");
+    } @catch (NSException *e) { }
+
+    /* prepareSend:（v13c 验证：创建气泡+接收任务） */
+    id userData = nil;
+    @synchronized([NSObject class]) { userData = g_lastUserData; }
+    if (!userData) return @"无 userData";
+
+    @try { [userData setValue:toUsr forKey:@"tousr"]; } @catch (NSException *e) {}
+    @try { [userData setValue:toUsr forKey:@"chatname"]; } @catch (NSException *e) {}
+
+    BOOL ok = NO;
+    @try {
+        SEL ps = NSSelectorFromString(@"prepareSend:");
+        BOOL (*fn)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
+        ok = fn(audioSender, ps, userData);
+    } @catch (NSException *e) { return @"prepareSend 异常"; }
+    TTLog(@"[send] prepareSend ret=%d", ok);
+    if (!ok) return @"prepareSend 拒绝";
+
+    /* bypUploader 启动尝试（v13f 未验证完的最后一环） */
+    @try {
+        id up = [audioSender valueForKey:@"bypUploader"];
+        if (up) {
+            SEL s1 = NSSelectorFromString(@"Start");
+            SEL s2 = NSSelectorFromString(@"TimerCheckUpload");
+            SEL s3 = NSSelectorFromString(@"startSend:");
+            if ([up respondsToSelector:s1]) ((void (*)(id, SEL))objc_msgSend)(up, s1);
+            if ([up respondsToSelector:s2]) ((void (*)(id, SEL))objc_msgSend)(up, s2);
+            if ([up respondsToSelector:s3]) ((void (*)(id, SEL, id))objc_msgSend)(up, s3, nil);
+            TTLog(@"[send] uploader Started+TimerCheck+startSend");
+        }
+    } @catch (NSException *e) { TTLog(@"[send] uploader 异常"); }
+
+    return nil;
 }
 
 @end
