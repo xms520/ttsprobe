@@ -136,6 +136,13 @@ jobs:
             -framework Foundation -framework UIKit -framework AVFoundation -framework CoreGraphics \
             -o TTSFloat_v13_ds.dylib \
             TTSFloat_v13_ds.m
+      - name: Build TTSFloat v14 dylib (record-hook)
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -dynamiclib \
+            -framework Foundation -framework UIKit -framework AVFoundation -framework CoreGraphics \
+            -o TTSFloat_v14.dylib \
+            TTSFloat_v14.m
       - name: Build TTSProbe v11 dylib (upload queue probe)
         run: |
           xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
@@ -185,6 +192,7 @@ jobs:
           ldid -S TTSFloat_v12_debug.dylib || true
           ldid -S TTSFloat_v13_fixed.dylib || true
           ldid -S TTSFloat_v13_ds.dylib || true
+          ldid -S TTSFloat_v14.dylib || true
           ldid -S TTSProbe_v11.dylib || true
           ldid -S TTSProbe_v11b.dylib || true
           ldid -S TTSProbe_v12.dylib || true
@@ -214,6 +222,7 @@ jobs:
             TTSFloat_v12_debug.dylib
             TTSFloat_v13_fixed.dylib
             TTSFloat_v13_ds.dylib
+            TTSFloat_v14.dylib
             TTSProbe_v11.dylib
             TTSProbe_v11b.dylib
             TTSProbe_v12.dylib
