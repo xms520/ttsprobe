@@ -34,11 +34,61 @@
 #include "fishhook.h"
 #import <AudioToolbox/AudioToolbox.h>
 
-/* TTS PCM 缓存（C 层 trampoline 消费） */
+
+/* ==================== 配置 ==================== */
+#define K_TTS_ENDPOINT @"https://www.tiax.pw/API/yuyin2.php"
+#define K_DEFAULT_VOICE @"2学长"
+#define K_APIKEY_BUILTIN @"86306ba1cf8d50b2866c8369a14b384fe1ff96900ca822d98bd35274e87b0635"
+
+static NSInteger g_targetSampleRate = 16000;
+
+static NSArray *VoiceList(void) {
+    return @[
+        @"2学长", @"AD学姐", @"alex克隆", @"阿蕾奇诺", @"爱莉希雅",
+        @"安倍晋三", @"八戒", @"白领御姐音", @"白鹿的声音", @"白岩松",
+        @"北方口音LY", @"北京地铁黄华报站", @"贝利亚", @"毕业季温情女学生",
+        @"菠萝宝宝yuna", @"伯纳德", @"采访女生", @"曹操", @"陈赫",
+        @"陈奕恒", @"重音TETO SV", @"重音teto", @"磁性电台女生", @"达叔",
+        @"六花", @"叶修", @"洛天依", @"初音未来", @"小新", @"蜡笔小新"
+    ];
+}
+
+/* ==================== 日志 ==================== */
+static NSString *g_logPath = nil;
+static void TTLog(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSLog(@"[TTSFloat] %@", s);
+    if (!g_logPath) return;
+    @autoreleasepool {
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
+        if (!fh) {
+            [[NSFileManager defaultManager] createFileAtPath:g_logPath contents:nil attributes:nil];
+            fh = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
+        }
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:[[NSString stringWithFormat:@"[TTSFloat] %@\n", s] dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+        }
+    }
+}
+
+/* ==================== TTS PCM 缓存（hook 替换数据源） ==================== */
+static NSString *g_voiceName = K_DEFAULT_VOICE;
+
+
+
+
 static NSData *g_pendingPCM = nil;       /* TTS 合成的完整 PCM */
 static NSUInteger g_pcmOffset = 0;       /* 已喂位置 */
 static BOOL g_replaceActive = NO;        /* 替换开关 */
 static NSString *g_voiceName = K_DEFAULT_VOICE;
+
+
+/* ==================== AudioQueue C 层替换（数据真正的源头） ==================== */
+/* TTS PCM 缓存（C 层 trampoline 消费） */
 
 /* trampoline：微信回调前替换 buffer 内容（官方 AudioToolbox 类型） */
 static void TTS_AQInputTrampoline(void *inUserData, AudioQueueRef inAQ,
@@ -107,51 +157,6 @@ static void InstallAudioQueueHook(void) {
         TTLog(@"[aq-hook] fishhook installed err=%d", err);
     });
 }
-
-/* ==================== 配置 ==================== */
-#define K_TTS_ENDPOINT @"https://www.tiax.pw/API/yuyin2.php"
-#define K_DEFAULT_VOICE @"2学长"
-#define K_APIKEY_BUILTIN @"86306ba1cf8d50b2866c8369a14b384fe1ff96900ca822d98bd35274e87b0635"
-
-static NSInteger g_targetSampleRate = 16000;
-
-static NSArray *VoiceList(void) {
-    return @[
-        @"2学长", @"AD学姐", @"alex克隆", @"阿蕾奇诺", @"爱莉希雅",
-        @"安倍晋三", @"八戒", @"白领御姐音", @"白鹿的声音", @"白岩松",
-        @"北方口音LY", @"北京地铁黄华报站", @"贝利亚", @"毕业季温情女学生",
-        @"菠萝宝宝yuna", @"伯纳德", @"采访女生", @"曹操", @"陈赫",
-        @"陈奕恒", @"重音TETO SV", @"重音teto", @"磁性电台女生", @"达叔",
-        @"六花", @"叶修", @"洛天依", @"初音未来", @"小新", @"蜡笔小新"
-    ];
-}
-
-/* ==================== 日志 ==================== */
-static NSString *g_logPath = nil;
-static void TTLog(NSString *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
-    NSLog(@"[TTSFloat] %@", s);
-    if (!g_logPath) return;
-    @autoreleasepool {
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
-        if (!fh) {
-            [[NSFileManager defaultManager] createFileAtPath:g_logPath contents:nil attributes:nil];
-            fh = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
-        }
-        if (fh) {
-            [fh seekToEndOfFile];
-            [fh writeData:[[NSString stringWithFormat:@"[TTSFloat] %@\n", s] dataUsingEncoding:NSUTF8StringEncoding]];
-            [fh closeFile];
-        }
-    }
-}
-
-/* ==================== TTS PCM 缓存（hook 替换数据源） ==================== */
-static NSString *g_voiceName = K_DEFAULT_VOICE;
-
-
 
 /* ==================== prepareSend 捕获（拿 tousr / AudioSender） ==================== */
 static NSString *g_lastToUsr = nil;
