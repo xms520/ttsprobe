@@ -259,50 +259,11 @@ static void TTSProbeSilkAPI(void) {
 static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     if (!pcmData.length || !toUsr.length) return @"数据为空";
 
-    /* ===== v13e: 完整录音生命周期复刻 =====
-     * SendOri 拒绝（无气泡）根因：它要求【活跃录音会话】存在。
-     * 方案：StartRecordFrom:ToUser:UserInfo: 启动真录音会话（微信自管状态）
-     *       → 喂 PCM → StopRecord 结束 → SendOri 发送。
-     * 所有 recorder/userData/缓存状态全部由微信自己管理。 */
-    id audioSender0 = nil;
-    @synchronized([NSObject class]) { audioSender0 = g_audioSender; }
-    if (!audioSender0) return @"拿不到 AudioSender（先按住说话一次）";
-
-    /* 1. 启动录音会话（复刻 BaseMsgContentLogicController 的调用） */
-    SEL canSel = NSSelectorFromString(@"CanStartRecordFrom:ToUser:");
-    SEL startSel = NSSelectorFromString(@"StartRecordFrom:ToUser:UserInfo:");
-    BOOL can = NO;
-    @try {
-        BOOL (*canFn)(id, SEL, id, id) = (BOOL (*)(id, SEL, id, id))objc_msgSend;
-        can = canFn(audioSender0, canSel, nil, toUsr);
-        TTLog(@"[rec] CanStartRecord ret=%d", can);
-    } @catch (NSException *e) { TTLog(@"[rec] CanStartRecord 异常: %@", e); }
-
-    if (!can) {
-        /* CanStartRecord 不让录（可能因为已有活跃会话）——先 stop 再试，或直接继续用现有会话 */
-        TTLog(@"[rec] CanStartRecord=NO，尝试先 StopRecord 清场再启动");
-        SEL stopSel = NSSelectorFromString(@"StopRecord");
-        if ([audioSender0 respondsToSelector:stopSel]) {
-            @try { ((void (*)(id, SEL))objc_msgSend)(audioSender0, stopSel); } @catch (NSException *e2) { }
-        }
-        @try {
-            BOOL (*canFn)(id, SEL, id, id) = (BOOL (*)(id, SEL, id, id))objc_msgSend;
-            can = canFn(audioSender0, canSel, nil, toUsr);
-            TTLog(@"[rec] 二次 CanStartRecord ret=%d", can);
-        } @catch (NSException *e3) { TTLog(@"[rec] 二次 CanStartRecord 异常: %@", e3); }
-    }
-
-    BOOL recording = NO;
-    if (can && [audioSender0 respondsToSelector:startSel]) {
-        @try {
-            BOOL (*startFn)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))objc_msgSend;
-            recording = startFn(audioSender0, startSel, nil, toUsr, nil);
-            TTLog(@"[rec] StartRecordFrom ret=%d", recording);
-        } @catch (NSException *e) {
-            TTLog(@"[rec] StartRecordFrom 异常: %@", e);
-        }
-    }
-    if (!recording) TTLog(@"[rec] 假录音未启动——继续走缓存喂入路径（可能仍转圈）");
+    /* v13f: 回到 v13c 验证过的路径（有气泡+silk），删掉假录音（SendOri路不通）。
+     * 新增：喂完数据后启动 UploadVoiceCDNMgr（bypUploader）——上传器可能从未启动。 */
+    id audioSenderChk = nil;
+    @synchronized([NSObject class]) { audioSenderChk = g_audioSender; }
+    if (!audioSenderChk) return @"拿不到 AudioSender（先按住说话一次）";
 
     TTSProbeSilkAPI();
 
@@ -605,72 +566,45 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         } @catch (__unused NSException *e) {}
     }
 
-    /* v13e: 结束录音会话（StopRecord），再 SendOri 发送 —— 复刻真实链
-     * OnRecorderEndRecording → SendOriVoiceMsgWithUserData: */
-    SEL stopSel2 = NSSelectorFromString(@"StopRecord");
-    if ([audioSender respondsToSelector:stopSel2]) {
-        @try {
-            ((void (*)(id, SEL))objc_msgSend)(audioSender, stopSel2);
-            TTLog(@"[rec] StopRecord done（结束假录音会话）");
-        } @catch (NSException *e0) {
-            TTLog(@"[rec] StopRecord 异常: %@", e0);
-        }
-    }
-
-    /* v13d: 真正的发送入口是 SendOriVoiceMsgWithUserData:（二进制证实的方法）。 */
-    SEL sendSel = NSSelectorFromString(@"SendOriVoiceMsgWithUserData:");
-    BOOL usedOri = NO;
-    if ([audioSender respondsToSelector:sendSel]) {
-        Method sm = class_getInstanceMethod([audioSender class], sendSel);
-        const char *enc = sm ? method_getTypeEncoding(sm) : NULL;
-        TTLog(@"[send] SendOriVoiceMsgWithUserData: type=%s", enc ? enc : "?");
-        @try {
-            ((void (*)(id, SEL, id))objc_msgSend)(audioSender, sendSel, userData);
-            usedOri = YES;
-            TTLog(@"[send] SendOriVoiceMsgWithUserData: 已调用");
-        } @catch (NSException *e) {
-            TTLog(@"[send] SendOriVoiceMsgWithUserData: 异常: %@", e);
-        }
-    } else {
-        TTLog(@"[send] SendOriVoiceMsgWithUserData: 不存在，回退 prepareSend:");
-    }
-    if (usedOri) {
-        TTLog(@"[send] SendOri accepted; 上传由微信真实管线处理");
-        return nil;
-    }
-
-    SEL ps = NSSelectorFromString(@"prepareSend:");
-    if (![audioSender respondsToSelector:ps])
-        return @"AudioSender 没有 prepareSend:";
-
-    Method psMethod = class_getInstanceMethod([audioSender class], ps);
-    if (psMethod) {
-        TTLog(@"[probe] prepareSend: type=%s args=%lu",
-              method_getTypeEncoding(psMethod),
-              (unsigned long)method_getNumberOfArguments(psMethod));
-    }
-
-    BOOL ok = NO;
+    /* v13f: 先 prepareSend:（v13c 验证能建气泡+接收任务），再启动上传器 */
+    SEL ps2 = NSSelectorFromString(@"prepareSend:");
+    BOOL ok2 = NO;
     @try {
         BOOL (*fn)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
-        ok = fn(audioSender, ps, userData);
+        ok2 = fn(audioSender, ps2, userData);
     } @catch (NSException *e) {
         TTLog(@"[send] prepareSend 异常: %@", e);
         return @"prepareSend 调用异常";
     }
+    TTLog(@"[send] prepareSend ret=%d", ok2);
+    if (!ok2) return @"prepareSend 返回失败";
 
-    TTLog(@"[send] prepareSend ret=%d", ok);
+    /* 关键新增：启动 UploadVoiceCDNMgr（bypUploader）——真实录音时它由录音会话启动，
+     * 我们没有录音会话所以它从未启动（AddNewPart 从未被 TTS 触发的根因）。 */
+    id uploader = nil;
+    @try { uploader = [audioSender valueForKey:@"bypUploader"]; } @catch (NSException *e) { }
+    TTLog(@"[send] bypUploader=%@ class=%@", uploader ? uploader : @"nil",
+          uploader ? NSStringFromClass([uploader class]) : @"-");
+    if (uploader) {
+        SEL startSel = NSSelectorFromString(@"Start");
+        SEL timerSel = NSSelectorFromString(@"TimerCheckUpload");
+        if ([uploader respondsToSelector:startSel]) {
+            @try {
+                ((void (*)(id, SEL))objc_msgSend)(uploader, startSel);
+                TTLog(@"[send] bypUploader Start 已调用");
+            } @catch (NSException *e2) { TTLog(@"[send] Start 异常: %@", e2); }
+        }
+        if ([uploader respondsToSelector:timerSel]) {
+            @try {
+                ((void (*)(id, SEL))objc_msgSend)(uploader, timerSel);
+                TTLog(@"[send] bypUploader TimerCheckUpload 已调用");
+            } @catch (NSException *e3) { TTLog(@"[send] TimerCheckUpload 异常: %@", e3); }
+        }
+    }
 
-    if (!ok)
-        return @"prepareSend 返回失败";
-
-    /*
-     * 这里不能宣称“服务器上传完成”。
-     * prepareSend 返回成功只代表微信接受了发送任务。
-     * v11 通过日志明确区分两者，避免 UI 假报成功。
-     */
-    TTLog(@"[send] prepareSend accepted; upload completion must be confirmed by WeChat callback/logs.");
+    TTLog(@"[send] prepareSend+uploader done; 等待微信上传管线回调确认");
     return nil;
+}
 }
 
 /* ==================== TTS API ==================== */
