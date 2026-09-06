@@ -315,9 +315,32 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
 
     BOOL recording = NO;
     if (can && [audioSender0 respondsToSelector:startSel]) {
+        /* 崩溃定位：先打印真实签名再决定怎么调 */
+        Method sm = class_getInstanceMethod([audioSender0 class], startSel);
+        const char *enc = sm ? method_getTypeEncoding(sm) : NULL;
+        NSUInteger nargs = sm ? method_getNumberOfArguments(sm) : 0;
+        TTLog(@"[rec] StartRecordFrom 真实签名: type=%s args=%lu", enc ? enc : "?", (unsigned long)nargs);
+
+        /* 按真实参数个数分派调用（arm64: 对象/标量寄存器不同，签名错=崩） */
         @try {
-            BOOL (*startFn)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))objc_msgSend;
-            recording = startFn(audioSender0, startSel, chatVC, toUsr, nil);
+            if (nargs == 5 && enc && enc[0] == 'B') {
+                BOOL (*fn)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))objc_msgSend;
+                recording = fn(audioSender0, startSel, chatVC, toUsr, nil);
+            } else if (nargs == 5 && enc && enc[0] == 'v') {
+                void (*fn)(id, SEL, id, id, id) = (void (*)(id, SEL, id, id, id))objc_msgSend;
+                fn(audioSender0, startSel, chatVC, toUsr, nil);
+                recording = YES;
+            } else if (nargs == 4 && enc && enc[0] == 'B') {
+                BOOL (*fn)(id, SEL, id, id) = (BOOL (*)(id, SEL, id, id))objc_msgSend;
+                recording = fn(audioSender0, startSel, chatVC, toUsr);
+            } else if (nargs == 4 && enc && enc[0] == 'v') {
+                void (*fn)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+                fn(audioSender0, startSel, chatVC, toUsr);
+                recording = YES;
+            } else {
+                TTLog(@"[rec] 未识别的签名形态（nargs=%lu ret=%c）——不调用",
+                      (unsigned long)nargs, enc ? enc[0] : '?');
+            }
             TTLog(@"[rec] StartRecordFrom ret=%d", recording);
         } @catch (NSException *e) {
             TTLog(@"[rec] StartRecordFrom 异常: %@", e);
