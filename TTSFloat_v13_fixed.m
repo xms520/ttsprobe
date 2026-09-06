@@ -259,6 +259,51 @@ static void TTSProbeSilkAPI(void) {
 static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
     if (!pcmData.length || !toUsr.length) return @"数据为空";
 
+    /* ===== v13e: 完整录音生命周期复刻 =====
+     * SendOri 拒绝（无气泡）根因：它要求【活跃录音会话】存在。
+     * 方案：StartRecordFrom:ToUser:UserInfo: 启动真录音会话（微信自管状态）
+     *       → 喂 PCM → StopRecord 结束 → SendOri 发送。
+     * 所有 recorder/userData/缓存状态全部由微信自己管理。 */
+    id audioSender0 = nil;
+    @synchronized([NSObject class]) { audioSender0 = g_audioSender; }
+    if (!audioSender0) return @"拿不到 AudioSender（先按住说话一次）";
+
+    /* 1. 启动录音会话（复刻 BaseMsgContentLogicController 的调用） */
+    SEL canSel = NSSelectorFromString(@"CanStartRecordFrom:ToUser:");
+    SEL startSel = NSSelectorFromString(@"StartRecordFrom:ToUser:UserInfo:");
+    BOOL can = NO;
+    @try {
+        BOOL (*canFn)(id, SEL, id, id) = (BOOL (*)(id, SEL, id, id))objc_msgSend;
+        can = canFn(audioSender0, canSel, nil, toUsr);
+        TTLog(@"[rec] CanStartRecord ret=%d", can);
+    } @catch (NSException *e) { TTLog(@"[rec] CanStartRecord 异常: %@", e); }
+
+    if (!can) {
+        /* CanStartRecord 不让录（可能因为已有活跃会话）——先 stop 再试，或直接继续用现有会话 */
+        TTLog(@"[rec] CanStartRecord=NO，尝试先 StopRecord 清场再启动");
+        SEL stopSel = NSSelectorFromString(@"StopRecord");
+        if ([audioSender0 respondsToSelector:stopSel]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(audioSender0, stopSel); } @catch (NSException *e2) { }
+        }
+        @try {
+            BOOL (*canFn)(id, SEL, id, id) = (BOOL (*)(id, SEL, id, id))objc_msgSend;
+            can = canFn(audioSender0, canSel, nil, toUsr);
+            TTLog(@"[rec] 二次 CanStartRecord ret=%d", can);
+        } @catch (NSException *e3) { TTLog(@"[rec] 二次 CanStartRecord 异常: %@", e3); }
+    }
+
+    BOOL recording = NO;
+    if (can && [audioSender0 respondsToSelector:startSel]) {
+        @try {
+            BOOL (*startFn)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))objc_msgSend;
+            recording = startFn(audioSender0, startSel, nil, toUsr, nil);
+            TTLog(@"[rec] StartRecordFrom ret=%d", recording);
+        } @catch (NSException *e) {
+            TTLog(@"[rec] StartRecordFrom 异常: %@", e);
+        }
+    }
+    if (!recording) TTLog(@"[rec] 假录音未启动——继续走缓存喂入路径（可能仍转圈）");
+
     TTSProbeSilkAPI();
 
     /*
@@ -560,9 +605,19 @@ static NSString *TTSSendVoice(NSData *pcmData, NSString *toUsr) {
         } @catch (__unused NSException *e) {}
     }
 
-    /* v13d: 真正的发送入口是 SendOriVoiceMsgWithUserData:（二进制证实的方法）。
-     * prepareSend: 只是 InternalMethod 内部准备——单独调它只会创建气泡
-     * 但不启动上传管线（"一直转圈"的根因）。优先 SendOri，回退 prepareSend。 */
+    /* v13e: 结束录音会话（StopRecord），再 SendOri 发送 —— 复刻真实链
+     * OnRecorderEndRecording → SendOriVoiceMsgWithUserData: */
+    SEL stopSel2 = NSSelectorFromString(@"StopRecord");
+    if ([audioSender respondsToSelector:stopSel2]) {
+        @try {
+            ((void (*)(id, SEL))objc_msgSend)(audioSender, stopSel2);
+            TTLog(@"[rec] StopRecord done（结束假录音会话）");
+        } @catch (NSException *e0) {
+            TTLog(@"[rec] StopRecord 异常: %@", e0);
+        }
+    }
+
+    /* v13d: 真正的发送入口是 SendOriVoiceMsgWithUserData:（二进制证实的方法）。 */
     SEL sendSel = NSSelectorFromString(@"SendOriVoiceMsgWithUserData:");
     BOOL usedOri = NO;
     if ([audioSender respondsToSelector:sendSel]) {
