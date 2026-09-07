@@ -37,6 +37,11 @@ static const char* (*L_tolstring)(lua_State*, int, size_t*);
 
 typedef void Il2CppDomain; typedef void Il2CppImage; typedef void Il2CppClass;
 typedef void Il2CppAssembly; typedef void FieldInfo;
+static void* (*I_runtime_invoke)(void* method, void* obj, void** params, void** exc);
+static void* (*I_get_method)(void* klass, const char* name, int args);
+static void* (*I_class_get_methods)(void* klass, void** iter);
+static const char* (*I_method_get_name)(void* method);
+static void* (*I_domain_get_orig)(void);
 static Il2CppDomain* (*I_domain_get)(void);
 static Il2CppAssembly** (*I_domain_assemblies)(const Il2CppDomain*, size_t*);
 static const Il2CppImage* (*I_asm_get_image)(Il2CppAssembly*);
@@ -102,7 +107,63 @@ static void resolve_syms(void) {
     I_class_field     = (void*)dlsym(g_uf, "il2cpp_class_get_field_from_name");
     I_field_static_get= (void*)dlsym(g_uf, "il2cpp_field_static_get_value");
     I_thread_attach   = (void*)dlsym(g_uf, "il2cpp_thread_attach");
+    I_runtime_invoke  = (void*)dlsym(g_uf, "il2cpp_runtime_invoke");
+    I_get_method      = (void*)dlsym(g_uf, "il2cpp_class_get_method_from_name");
+    I_class_get_methods = (void*)dlsym(g_uf, "il2cpp_class_get_methods");
+    I_method_get_name = (void*)dlsym(g_uf, "il2cpp_method_get_name");
     }
+}
+
+// ── 全局变速：UnityEngine.Time.timeScale（引擎级，影响 Update/动画/协程/物理）──
+// 通路：il2cpp_domain_get → 找 UnityEngine.CoreModule 图像 → class_from_name("UnityEngine","Time")
+//      → class_get_method_from_name("Time","set_timeScale",1) → runtime_invoke
+static void* g_time_class = NULL;
+static void* g_set_timescale = NULL;
+static volatile float pm_ts_target = 1.0f;   // UI 写；主线程 tick 应用
+static volatile int   pm_ts_state = 0;       // 0=off 1=on
+static int ts_init_once = 0;
+
+static void ts_try_init(void) {
+    // 全主线程调用；失败只 log 一次（图像/类未就绪时下个 tick 重试由调用方控制）
+    if (ts_init_once && !g_time_class) return;
+    void* dom = I_domain_get ? I_domain_get() : NULL;
+    if (!dom) return;
+    size_t n = 0;
+    Il2CppAssembly** asms = I_domain_assemblies ? I_domain_assemblies(dom, &n) : NULL;
+    if (!asms) return;
+    for (size_t i = 0; i < n; i++) {
+        const Il2CppImage* img = I_asm_get_image(asms[i]);
+        if (!img) continue;
+        const char* nm = I_image_get_name(img);
+        if (!nm) continue;
+        if (strstr(nm, "UnityEngine.CoreModule") != nm) continue;
+        Il2CppClass* k = I_class_from_name((const Il2CppImage*)img, "UnityEngine", "Time");
+        if (k) {
+            g_time_class = k;
+            void* m = I_get_method ? I_get_method(k, "set_timeScale", 1) : NULL;
+            if (m) g_set_timescale = m;
+            LOG("ts: Time class=%p set_timeScale=%p (CoreModule image=%p)\n", k, m, (void*)img);
+        } else {
+            LOG("ts: CoreModule found but Time class miss\n");
+        }
+        return;
+    }
+    LOG("ts: CoreModule image not found (%zu asm)\n", n);
+    ts_init_once = 1;
+}
+
+static void ts_apply(void) {
+    // 主线程 tick 调用：把 UI 目标值写进 Time.timeScale
+    static float last = 0.0f;
+    float want = pm_ts_state ? pm_ts_target : 1.0f;
+    if (want == last) return;
+    if (!g_set_timescale) { ts_try_init(); if (!g_set_timescale) return; }
+    float v = want;
+    void* exc = NULL;
+    I_runtime_invoke(g_set_timescale, NULL, (void**)&v, &exc);
+    if (exc) { LOG("ts: invoke exception=%p\n", exc); return; }
+    last = want;
+    LOG("ts: timeScale -> %.2f\n", (double)want);
 }
 
 static int lua_dostring(const char* code) {
@@ -349,6 +410,11 @@ static void install_beat(void);
 static void run_pending_on_main(void) {
     if (g_pending_job == 0) return;
     int job = g_pending_job; g_pending_job = 0;
+    if (job == 4) {   // 变速：timeScale 应用（主线程）
+        ts_try_init();
+        ts_apply();
+        return;
+    }
     if (!g_L) return;
     if (job == 3) {
         // v8: 30s ping —— 在游戏主线程执行（与游戏自身 Lua 串行，绝不竞态）
@@ -546,6 +612,18 @@ static void* worker(void* a) {
                 if (L_getstate) { g_L = L_getstate(); if (g_L) { LOG("L re-acquired %p\n",(void*)g_L); g_pending_job = 2; post_to_main(NULL); } }
             }
         }
+        // 变速 watch：UI 写 pm_ts_target/pm_ts_state（volatile）后置 job=4；
+        // worker 每 tick 检查脏标记投递主线程应用（约 1.5s 内生效）
+        {
+            static float ts_last_seen = -1.0f;
+            static int ts_state_seen = -1;
+            if (pm_ts_target != ts_last_seen || pm_ts_state != ts_state_seen) {
+                ts_last_seen = pm_ts_target;
+                ts_state_seen = pm_ts_state;
+                g_pending_job = 4;
+                post_to_main(NULL);
+            }
+        }
         if ((tick++ % 3) == 0) read_flags();
         usleep(500000);
     }
@@ -607,6 +685,12 @@ static BOOL fg_shouldSkip(NSString *bid) {
 #pragma mark - 状态渲染（C 状态 → 面板控件）
 
 static NSString *pm_godText(void)    { return f_godmode ? @"无敌 · 开" : @"无敌 · 关"; }
+static NSString *pm_tsText(void) {
+    if (!pm_ts_state) return @"变速 · 关";
+    if (pm_ts_target >= 3.0f) return @"变速 · 3x";
+    if (pm_ts_target >= 2.0f) return @"变速 · 2x";
+    return @"变速 · ½x";
+}
 static NSString *pm_hitText(void)    { return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关"); }
 static NSString *pm_engineText(void) {
     if (!g_uf)  return @"引擎 · 等待游戏加载";
@@ -741,7 +825,7 @@ static NSString *pm_engineText(void) {
     if (g_panel) { [self fg_closePanel]; return; }
     UIWindow *kw = fg_keyWindow();
     if (!kw) return;
-    CGFloat pw = 280, ph = 360;
+    CGFloat pw = 280, ph = 410;
     FloatGlassPanel *p = [[FloatGlassPanel alloc] initWithFrame:
         CGRectMake((kw.bounds.size.width  - pw) / 2.0,
                    (kw.bounds.size.height - ph) / 2.0, pw, ph)];
@@ -761,6 +845,7 @@ static NSString *pm_engineText(void) {
 @implementation FloatGlassPanel {
     UIButton *_godBtn;
     UIButton *_hitBtn;
+    UIButton *_tsBtn;
     UIButton *_tipBtn;
     UILabel  *_engLabel;
     NSTimer  *_refreshTimer;
@@ -807,12 +892,13 @@ static NSString *pm_engineText(void) {
         title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         [self addSubview:title];
 
-        // ── 功能开关（无敌/秒杀）+ 引擎状态 + 打赏贴底 ──
+        // ── 功能开关（无敌/秒杀/变速）+ 引擎状态 + 打赏贴底 ──
         _godBtn = [self pm_mkSwitch:CGRectMake(16, 56, 248, 46) title:pm_godText() action:@selector(pm_godTap:)];
         _hitBtn = [self pm_mkSwitch:CGRectMake(16, 110, 248, 46) title:pm_hitText() action:@selector(pm_hitTap:)];
+        _tsBtn  = [self pm_mkSwitch:CGRectMake(16, 164, 248, 46) title:pm_tsText() action:@selector(pm_tsTap:)];
 
         // 引擎状态行
-        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 172, 248, 34)];
+        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 218, 248, 34)];
         _engLabel.text = pm_engineText();
         _engLabel.textAlignment = NSTextAlignmentCenter;
         _engLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
@@ -958,6 +1044,17 @@ static NSString *pm_engineText(void) {
     LOG("ui: onehit=%d\n", (int)f_onehit);
 }
 
+- (void)pm_tsTap:(id)sender {
+    (void)sender;
+    // 关 → 2x → 3x → ½x → 关
+    if (!pm_ts_state)      { pm_ts_state = 1; pm_ts_target = 2.0f; }
+    else if (pm_ts_target >= 3.0f) { pm_ts_state = 1; pm_ts_target = 0.5f; }
+    else if (pm_ts_target >= 2.0f) { pm_ts_target = 3.0f; }
+    else                   { pm_ts_state = 0; pm_ts_target = 1.0f; }
+    [_tsBtn setTitle:pm_tsText() forState:UIControlStateNormal];
+    LOG("ui: ts state=%d target=%.2f\n", (int)pm_ts_state, (double)pm_ts_target);
+}
+
 - (void)pm_tipTap:(id)sender {
     (void)sender;
     LOG("ui: tip tap\n");
@@ -968,6 +1065,7 @@ static NSString *pm_engineText(void) {
     _engLabel.text = pm_engineText();
     [_godBtn setTitle:pm_godText() forState:UIControlStateNormal];
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
+    [_tsBtn setTitle:pm_tsText() forState:UIControlStateNormal];
 }
 
 - (void)fg_close {
@@ -1069,7 +1167,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v8 pid=%d\n", getpid());
+        LOG("PMGlass v9 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
