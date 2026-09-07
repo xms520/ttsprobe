@@ -483,6 +483,7 @@ static UIWindow *g_ttsWindow = nil;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic) NSInteger voiceIndex;
+- (void)dragPanel:(UIPanGestureRecognizer *)g;
 - (void)kbWillShow:(NSNotification *)n;
 - (void)kbWillHide:(NSNotification *)n;
 - (void)sendDirect;
@@ -494,7 +495,7 @@ static UIWindow *g_ttsWindow = nil;
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (!self) return nil;
-    self.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.92];
+    self.backgroundColor = [UIColor colorWithWhite:0.98 alpha:0.98];
     self.layer.cornerRadius = 28;
     self.layer.masksToBounds = YES;
     self.userInteractionEnabled = YES;
@@ -509,6 +510,15 @@ static UIWindow *g_ttsWindow = nil;
     [self addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(togglePanel)]];
     [self addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)]];
     return self;
+}
+
+- (void)dragPanel:(UIPanGestureRecognizer *)g {
+    static CGPoint start;
+    if (g.state == UIGestureRecognizerStateBegan) start = self.panel.center;
+    if (g.state == UIGestureRecognizerStateChanged) {
+        CGPoint t = [g translationInView:self.panel.superview];
+        self.panel.center = CGPointMake(start.x + t.x, start.y + t.y);
+    }
 }
 
 - (void)drag:(UIPanGestureRecognizer *)g {
@@ -537,35 +547,40 @@ static UIWindow *g_ttsWindow = nil;
     CGFloat w = 300, h = 250;
     CGRect sc = UIScreen.mainScreen.bounds;
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(MAX(10, CGRectGetMidX(sc) - w / 2), 80, w, h)];
-    panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+    panel.backgroundColor = [UIColor colorWithWhite:0.98 alpha:0.99];
     panel.layer.cornerRadius = 18;
     panel.layer.masksToBounds = YES;
     self.panel = panel;
+
+    /* 全屏拖动：面板任意位置可拖（输入框等子控件点击不受影响） */
+    UIPanGestureRecognizer *ppan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:self action:@selector(dragPanel:)];
+    [panel addGestureRecognizer:ppan];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(kbWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(kbWillHide:) name:UIKeyboardWillHideNotification object:nil];
 
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, 180, 28)];
     title.text = @"🔊 文字转语音";
-    title.textColor = UIColor.whiteColor;
+    title.textColor = UIColor.blackColor;
     title.font = [UIFont boldSystemFontOfSize:16];
     [panel addSubview:title];
 
     UILabel *vt = [[UILabel alloc] initWithFrame:CGRectMake(16, 45, 45, 30)];
     vt.text = @"音色";
-    vt.textColor = UIColor.whiteColor;
+    vt.textColor = UIColor.blackColor;
     [panel addSubview:vt];
 
     UIButton *prev = [UIButton buttonWithType:UIButtonTypeSystem];
     prev.frame = CGRectMake(75, 43, 38, 34);
     [prev setTitle:@"◀" forState:UIControlStateNormal];
-    [prev setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [prev setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
     [prev addTarget:self action:@selector(prevVoice) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:prev];
 
     self.voiceLabel = [[UILabel alloc] initWithFrame:CGRectMake(113, 43, 105, 34)];
     self.voiceLabel.text = VoiceList()[self.voiceIndex];
-    self.voiceLabel.textColor = UIColor.whiteColor;
+    self.voiceLabel.textColor = UIColor.blackColor;
     self.voiceLabel.textAlignment = NSTextAlignmentCenter;
     self.voiceLabel.font = [UIFont boldSystemFontOfSize:14];
     [panel addSubview:self.voiceLabel];
@@ -573,13 +588,13 @@ static UIWindow *g_ttsWindow = nil;
     UIButton *next = [UIButton buttonWithType:UIButtonTypeSystem];
     next.frame = CGRectMake(220, 43, 38, 34);
     [next setTitle:@"▶" forState:UIControlStateNormal];
-    [next setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [next setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
     [next addTarget:self action:@selector(nextVoice) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:next];
 
     self.input = [[UITextView alloc] initWithFrame:CGRectMake(12, 82, 276, 92)];
-    self.input.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1];
-    self.input.textColor = UIColor.whiteColor;
+    self.input.backgroundColor = [UIColor colorWithWhite:0.92 alpha:1];
+    self.input.textColor = UIColor.blackColor;
     self.input.font = [UIFont systemFontOfSize:15];
     self.input.layer.cornerRadius = 10;
     [panel addSubview:self.input];
@@ -596,7 +611,7 @@ static UIWindow *g_ttsWindow = nil;
 
     self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 222, 276, 20)];
     self.statusLabel.text = @"输入文字后点合成";
-    self.statusLabel.textColor = [UIColor colorWithWhite:.75 alpha:1];
+    self.statusLabel.textColor = [UIColor colorWithWhite:0.25 alpha:1];
     self.statusLabel.font = [UIFont systemFontOfSize:11];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
     [panel addSubview:self.statusLabel];
@@ -635,33 +650,88 @@ static UIWindow *g_ttsWindow = nil;
     NSString *text = self.input.text;
     if (!text.length) { self.statusLabel.text = @"请输入文字"; return; }
 
-    NSString *peer = nil;
-    @synchronized([NSObject class]) { peer = [g_lastToUsr copy]; }
+    NSString *peer = nil, *myWxid = nil;
+    NSDictionary *userInfo = nil;
+    id audioSender = nil;
+    @synchronized([NSObject class]) {
+        peer = [g_lastToUsr copy];
+        myWxid = [g_myWxid copy];
+        userInfo = g_lastUserInfo;
+        audioSender = g_audioSender;
+    }
     if (!peer.length) { self.statusLabel.text = @"先按住说话一次（捕获会话）"; return; }
+    if (!myWxid.length) { self.statusLabel.text = @"先按住说话一次（捕获身份）"; return; }
+    if (!audioSender) { self.statusLabel.text = @"拿不到 AudioSender"; return; }
 
-    self.send.enabled = NO;
-    self.statusLabel.text = @"合成发送中…";
-    [self.spinner startAnimating];
     [self.input resignFirstResponder];
+    self.send.enabled = NO;
+    self.statusLabel.text = @"合成中…";
+    [self.spinner startAnimating];
     NSString *voice = g_voiceName ? g_voiceName : K_DEFAULT_VOICE;
 
     RequestTTS(text, voice, ^(NSData *audio, NSError *error) {
-        if (error) { [self setStatusOnMain:[NSString stringWithFormat:@"失败：%@", error.localizedDescription]]; return; }
+        if (error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.send.enabled = YES; [self.spinner stopAnimating];
+                self.statusLabel.text = [NSString stringWithFormat:@"失败：%@", error.localizedDescription];
+            });
+            return;
+        }
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSData *pcm = DecodeToPCM(audio);
-            if (!pcm) { [self setStatusOnMain:@"PCM解码失败"]; return; }
+            if (!pcm) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.send.enabled = YES; [self.spinner stopAnimating];
+                    self.statusLabel.text = @"PCM解码失败";
+                });
+                return;
+            }
+            NSUInteger ms = pcm.length * 1000 / (NSUInteger)(g_targetSampleRate * 2);
 
-            NSString *err = [self sendVoiceToWeChat:pcm toUsr:peer];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self.send.enabled = YES;
-                [self.spinner stopAnimating];
-                if (err) {
-                    self.statusLabel.text = [NSString stringWithFormat:@"失败：%@", err];
-                } else {
-                    self.statusLabel.text = @"2️⃣ 已就绪 — 按住说话即发送TTS";
-                    [self.input resignFirstResponder];
-                }
-            });
+            /* 装填 C 层替换缓存（trampoline 消费） */
+            @synchronized([NSObject class]) {
+                g_pendingPCM = pcm;
+                g_pcmOffset = 0;
+                g_replaceActive = YES;
+            }
+            TTLog(@"[panel] PCM 装填 %lu bytes ≈ %lums — 启动录音会话", (unsigned long)pcm.length, (unsigned long)ms);
+
+            /* ① 编程式启动录音（参数身份 v20 已确认：自己wxid/对方wxid/字典） */
+            SEL startSel = NSSelectorFromString(@"StartRecordFrom:ToUser:UserInfo:");
+            BOOL recording = NO;
+            @try {
+                BOOL (*fn)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))objc_msgSend;
+                recording = fn(audioSender, startSel, myWxid, peer, userInfo);
+                TTLog(@"[panel] StartRecordFrom ret=%d (wxid=%@)", recording, myWxid);
+            } @catch (NSException *e) {
+                TTLog(@"[panel] StartRecordFrom 异常: %@", e);
+            }
+
+            if (recording) {
+                /* ② 等 trampoline 喂完 PCM（按时长）+ 500ms 余量 → ③ StopRecord 自动发送 */
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((ms + 500) * NSEC_PER_MSEC)),
+                               dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    SEL stopSel = NSSelectorFromString(@"StopRecord");
+                    @try {
+                        ((void (*)(id, SEL))objc_msgSend)(audioSender, stopSel);
+                        TTLog(@"[panel] StopRecord done — 微信应已发送 TTS 语音");
+                    } @catch (NSException *e) {
+                        TTLog(@"[panel] StopRecord 异常: %@", e);
+                    }
+                    @synchronized([NSObject class]) { g_replaceActive = NO; }
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        self.send.enabled = YES; [self.spinner stopAnimating];
+                        self.statusLabel.text = @"✅ 已发送";
+                        self.input.text = @"";
+                    });
+                });
+            } else {
+                @synchronized([NSObject class]) { g_replaceActive = NO; }
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.send.enabled = YES; [self.spinner stopAnimating];
+                    self.statusLabel.text = @"录音会话启动失败";
+                });
+            }
         });
     });
 }
