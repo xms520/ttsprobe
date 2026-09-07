@@ -84,6 +84,7 @@ static NSString *g_voiceName = K_DEFAULT_VOICE;
 static NSData *g_pendingPCM = nil;       /* TTS 合成的完整 PCM */
 static NSUInteger g_pcmOffset = 0;       /* 已喂位置 */
 static BOOL g_replaceActive = NO;        /* 替换开关 */
+static BOOL g_pcmFedDone = NO;           /* TTS 数据已全部喂进管线（StopRecord 时机依据） */
 
 /* ==================== v20: 录音启动参数捕获（面板直接发送的关键） ====================
  * StartRecordFrom:ToUser:UserInfo: 真实签名 B40@0:8@16@24@32（3个无类名对象参）。
@@ -151,6 +152,10 @@ static void TTS_AQInputTrampoline(void *inUserData, AudioQueueRef inAQ,
                 }
             } else {
                 memset(inBuffer->mAudioData, 0, inBuffer->mAudioDataByteSize);
+                if (!g_pcmFedDone) {
+                    g_pcmFedDone = YES;   /* 喂完标记（TTS 数据已全部进入管线） */
+                    TTLog(@"[aq-replace] PCM 全部喂完 — 静音帧（等待 StopRecord）");
+                }
             }
         }
     }
@@ -475,7 +480,7 @@ static UIWindow *g_ttsWindow = nil;
 - (BOOL)prefersStatusBarHidden { return YES; }
 @end
 
-@interface TTSFloatView : UIView
+@interface TTSFloatView : UIView <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UIView *panel;
 @property (nonatomic, strong) UITextView *input;
 @property (nonatomic, strong) UIButton *send;
@@ -484,6 +489,8 @@ static UIWindow *g_ttsWindow = nil;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic) NSInteger voiceIndex;
 - (void)dragPanel:(UIPanGestureRecognizer *)g;
+- (void)showVoiceList;
+- (void)closeVoiceList;
 - (void)kbWillShow:(NSNotification *)n;
 - (void)kbWillHide:(NSNotification *)n;
 - (void)sendDirect;
@@ -583,6 +590,10 @@ static UIWindow *g_ttsWindow = nil;
     self.voiceLabel.textColor = UIColor.blackColor;
     self.voiceLabel.textAlignment = NSTextAlignmentCenter;
     self.voiceLabel.font = [UIFont boldSystemFontOfSize:14];
+    self.voiceLabel.userInteractionEnabled = YES;
+    UITapGestureRecognizer *vTap = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(showVoiceList)];
+    [self.voiceLabel addGestureRecognizer:vTap];
     [panel addSubview:self.voiceLabel];
 
     UIButton *next = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -622,6 +633,89 @@ static UIWindow *g_ttsWindow = nil;
 
     [self.superview addSubview:panel];
     [self.input becomeFirstResponder];
+}
+
+/* 音色列表弹层（点击音色名弹出，点击行选择） */
+- (void)showVoiceList {
+    /* 半透明遮罩 */
+    CGRect scr = UIScreen.mainScreen.bounds;
+    UIView *mask = [[UIView alloc] initWithFrame:scr];
+    mask.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+    mask.tag = 9527;
+
+    /* 白色列表面板（屏幕中部） */
+    CGFloat lw = 280, lh = 360;
+    UIView *listPanel = [[UIView alloc] initWithFrame:CGRectMake((scr.size.width-lw)/2, (scr.size.height-lh)/2, lw, lh)];
+    listPanel.backgroundColor = UIColor.whiteColor;
+    listPanel.layer.cornerRadius = 14;
+    listPanel.tag = 9528;
+    [mask addSubview:listPanel];
+
+    UILabel *lt = [[UILabel alloc] initWithFrame:CGRectMake(0, 8, lw, 30)];
+    lt.text = @"选择音色";
+    lt.textColor = UIColor.blackColor;
+    lt.textAlignment = NSTextAlignmentCenter;
+    lt.font = [UIFont boldSystemFontOfSize:15];
+    [listPanel addSubview:lt];
+
+    /* 表格 */
+    UITableView *tv = [[UITableView alloc] initWithFrame:CGRectMake(0, 42, lw, lh-42)
+                                                   style:UITableViewStylePlain];
+    tv.tag = 9529;
+    tv.dataSource = (id<UITableViewDataSource>)self;
+    tv.delegate = (id<UITableViewDelegate>)self;
+    tv.rowHeight = 44;
+    [listPanel addSubview:tv];
+
+    /* 点遮罩关闭 */
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(closeVoiceList)];
+    [mask addGestureRecognizer:tap];
+
+    /* 挂到窗口（全屏层级） */
+    UIWindow *w = nil;
+    for (UIWindow *win in UIApplication.sharedApplication.windows) {
+        if (win.isKeyWindow) { w = win; break; }
+    }
+    if (!w) w = UIApplication.sharedApplication.windows.firstObject;
+    [w addSubview:mask];
+    TTLog(@"[voice-list] shown (%lu voices)", (unsigned long)VoiceList().count);
+}
+
+- (void)closeVoiceList {
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        for (UIView *sub in w.subviews) {
+            if (sub.tag == 9527) [sub removeFromSuperview];
+        }
+    }
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 1; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return (NSInteger)VoiceList().count;
+}
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    static NSString *cid = @"VC";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
+    NSString *name = VoiceList()[ip.row];
+    cell.textLabel.text = name;
+    cell.textLabel.font = [UIFont systemFontOfSize:14];
+    cell.textLabel.textColor = UIColor.blackColor;
+    /* 当前选中打勾 */
+    NSString *cur = g_voiceName ? g_voiceName : K_DEFAULT_VOICE;
+    cell.accessoryType = [name isEqualToString:cur] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    cell.backgroundColor = UIColor.whiteColor;
+    return cell;
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    NSString *name = VoiceList()[ip.row];
+    g_voiceName = name;
+    self.voiceIndex = (int)ip.row;
+    self.voiceLabel.text = name;
+    [self closeVoiceList];
+    [self setStatusOnMain:[NSString stringWithFormat:@"音色：%@", name]];
+    TTLog(@"[voice-list] selected %@", name);
 }
 
 - (void)prevVoice {
@@ -693,6 +787,7 @@ static UIWindow *g_ttsWindow = nil;
                 g_pendingPCM = pcm;
                 g_pcmOffset = 0;
                 g_replaceActive = YES;
+                g_pcmFedDone = NO;
             }
             TTLog(@"[panel] PCM 装填 %lu bytes ≈ %lums — 启动录音会话", (unsigned long)pcm.length, (unsigned long)ms);
 
@@ -708,17 +803,32 @@ static UIWindow *g_ttsWindow = nil;
             }
 
             if (recording) {
-                /* ② 等 trampoline 喂完 PCM（按时长）+ 500ms 余量 → ③ StopRecord 自动发送 */
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((ms + 500) * NSEC_PER_MSEC)),
-                               dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                /* ② 轮询等待：PCM 喂完后（g_pcmFedDone）+ 800ms 余量再 Stop
+                 *    （Stop 太早会截断数据 → 微信等完整数据 → 转圈） */
+                __block int waited = 0;
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                    while (waited < 15000) { /* 最多等 15 秒 */
+                        [NSThread sleepForTimeInterval:0.1];
+                        waited += 100;
+                        BOOL fed = NO;
+                        @synchronized([NSObject class]) { fed = g_pcmFedDone; }
+                        if (fed) {
+                            /* 喂完后留 800ms 让最后几帧静音进管线 */
+                            [NSThread sleepForTimeInterval:0.8];
+                            break;
+                        }
+                    }
                     SEL stopSel = NSSelectorFromString(@"StopRecord");
                     @try {
                         ((void (*)(id, SEL))objc_msgSend)(audioSender, stopSel);
-                        TTLog(@"[panel] StopRecord done — 微信应已发送 TTS 语音");
+                        TTLog(@"[panel] StopRecord done (waited=%dms) — 微信应已发送", waited);
                     } @catch (NSException *e) {
                         TTLog(@"[panel] StopRecord 异常: %@", e);
                     }
-                    @synchronized([NSObject class]) { g_replaceActive = NO; }
+                    @synchronized([NSObject class]) {
+                        g_replaceActive = NO;
+                        g_pcmFedDone = NO;
+                    }
                     dispatch_async(dispatch_get_main_queue(), ^{
                         self.send.enabled = YES; [self.spinner stopAnimating];
                         self.statusLabel.text = @"✅ 已发送";
