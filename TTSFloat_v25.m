@@ -44,6 +44,10 @@
 
 static NSInteger g_targetSampleRate = 16000;
 
+/* v25: 当前音色（持久化到 NSUserDefaults，微信重启不丢） */
+static NSString *g_voiceName = nil;
+static NSString *const kTTSVoiceKey = @"TTSFloatVoiceName";
+
 /* ==================== v25: 动态音色（全部来自 ys.php，删除旧硬编码列表） ====================
  * 音色接口：https://www.tiax.pw/API/ys.php  → 纯文本 "1. TVB女\n2. 懒羊羊\n..."
  * 合成接口：https://www.tiax.pw/API/yuyin2.php?text=文字&voice=音色名&apikey=key
@@ -56,6 +60,70 @@ static NSArray *g_voices = nil;          /* 全量音色（去重保序） */
 static NSArray *g_voiceFilter = nil;     /* 搜索过滤结果（nil = 不过滤） */
 static NSInteger g_voiceFetchState = 0;  /* 0 未拉取 / 1 进行中 / 2 成功 / -1 失败 */
 static BOOL g_voiceFetchInited = NO;
+
+/* ==================== 日志 ==================== */
+static NSString *g_logPath = nil;
+static void TTLog(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSLog(@"[TTSFloat] %@", s);
+    if (!g_logPath) return;
+    @autoreleasepool {
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
+        if (!fh) {
+            [[NSFileManager defaultManager] createFileAtPath:g_logPath contents:nil attributes:nil];
+            fh = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
+        }
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:[[NSString stringWithFormat:@"[TTSFloat] %@\n", s] dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+        }
+    }
+}
+
+/* ==================== 崩溃定位（v23 新增） ====================
+ * 闪退后日志里会多出 [CRASH] 行；dylib 基址一并打印，
+ * 崩溃帧地址 - 基址 = Hopper 里 MicroMessenger.dylib 的偏移（结合 .ips 报告定位）。 */
+#include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <dlfcn.h>
+static int g_crashFd = -1;
+static void TTSCrashLogException(NSException *e) {
+    TTLog(@"[CRASH-EXC] %@ - %@\n%@", e.name, e.reason, e.callStackSymbols);
+}
+static void TTSCrashHandler(int sig, siginfo_t *info, void *uc) {
+    (void)uc;
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), "\n[CRASH] sig=%d addr=%p\n",
+                     sig, info ? info->si_addr : NULL);
+    if (g_crashFd >= 0) write(g_crashFd, buf, (size_t)n);
+    void *frames[48];
+    int cnt = 0;
+    @try { cnt = backtrace(frames, 48); } @catch(...) { cnt = 0; }
+    if (g_crashFd >= 0) backtrace_symbols_fd(frames, cnt, g_crashFd);
+    _exit(128 + sig);
+}
+static void TTSInstallCrashGuards(void) {
+    NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/TTSCrash.log"];
+    g_crashFd = open(p.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    Dl_info di; void *self0 = (void *)&TTSInstallCrashGuards;
+    if (dladdr(self0, &di)) {
+        TTLog(@"[crash-guard] dylib=%s base=%p", di.dli_fname ? di.dli_fname : "?", di.dli_fbase);
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = TTSCrashHandler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    NSSetUncaughtExceptionHandler(&TTSCrashLogException);
+}
 
 /* 只保留 "N. 名称" 形式的行（去掉分类标题等噪声），去重保序 */
 static NSArray *TTSParseVoiceList(NSString *text) {
@@ -134,74 +202,9 @@ static void TTSSetVoice(NSString *name) {
     [NSUserDefaults.standardUserDefaults setObject:name forKey:kTTSVoiceKey];
 }
 
-/* ==================== 日志 ==================== */
-static NSString *g_logPath = nil;
-static void TTLog(NSString *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
-    NSLog(@"[TTSFloat] %@", s);
-    if (!g_logPath) return;
-    @autoreleasepool {
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
-        if (!fh) {
-            [[NSFileManager defaultManager] createFileAtPath:g_logPath contents:nil attributes:nil];
-            fh = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
-        }
-        if (fh) {
-            [fh seekToEndOfFile];
-            [fh writeData:[[NSString stringWithFormat:@"[TTSFloat] %@\n", s] dataUsingEncoding:NSUTF8StringEncoding]];
-            [fh closeFile];
-        }
-    }
-}
-
-/* ==================== 崩溃定位（v23 新增） ====================
- * 闪退后日志里会多出 [CRASH] 行；dylib 基址一并打印，
- * 崩溃帧地址 - 基址 = Hopper 里 MicroMessenger.dylib 的偏移（结合 .ips 报告定位）。 */
-#include <execinfo.h>
-#include <signal.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <dlfcn.h>
-static int g_crashFd = -1;
-static void TTSCrashLogException(NSException *e) {
-    TTLog(@"[CRASH-EXC] %@ - %@\n%@", e.name, e.reason, e.callStackSymbols);
-}
-static void TTSCrashHandler(int sig, siginfo_t *info, void *uc) {
-    (void)uc;
-    char buf[256];
-    int n = snprintf(buf, sizeof(buf), "\n[CRASH] sig=%d addr=%p\n",
-                     sig, info ? info->si_addr : NULL);
-    if (g_crashFd >= 0) write(g_crashFd, buf, (size_t)n);
-    void *frames[48];
-    int cnt = 0;
-    @try { cnt = backtrace(frames, 48); } @catch(...) { cnt = 0; }
-    if (g_crashFd >= 0) backtrace_symbols_fd(frames, cnt, g_crashFd);
-    _exit(128 + sig);
-}
-static void TTSInstallCrashGuards(void) {
-    NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/TTSCrash.log"];
-    g_crashFd = open(p.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    Dl_info di; void *self0 = (void *)&TTSInstallCrashGuards;
-    if (dladdr(self0, &di)) {
-        TTLog(@"[crash-guard] dylib=%s base=%p", di.dli_fname ? di.dli_fname : "?", di.dli_fbase);
-    }
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = TTSCrashHandler;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGABRT, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGILL, &sa, NULL);
-    NSSetUncaughtExceptionHandler(&TTSCrashLogException);
-}
 
 
 /* ==================== TTS PCM 缓存（hook 替换数据源） ==================== */
-static NSString *g_voiceName = nil;   /* v25: 从 NSUserDefaults 恢复（K_DEFAULT_VOICE 兜底） */
-static NSString *const kTTSVoiceKey = @"TTSFloatVoiceName";
 
 
 
