@@ -963,7 +963,7 @@ static UIWindow *g_ttsWindow = nil;
                 /* ② 轮询等待：PCM 喂完后（g_pcmFedDone）+ 800ms 余量再 Stop
                  *    （Stop 太早会截断数据 → 微信等完整数据 → 转圈） */
                 __block int waited = 0;
-                dispatch_async(dispatch_get_global_queue(QOS_DEFAULT, 0), ^{
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
                     /* v22: 实时节奏喂数 → 上限 = 15s + 2×语音时长（48kHz 采集时喂完需 3× 语音时长） */
                     int capMs = 15000 + 2 * (int)ms;
                     while (waited < capMs) {
