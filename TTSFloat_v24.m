@@ -882,8 +882,11 @@ static UIImage *TTSLoadBallImage(void) {
     mask.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
     self.tipMask = mask;
 
-    CGFloat cw = MIN(320, sc.size.width - 48);
-    CGFloat ch = cw + 86;                       /* 二维码(正方形) + 标题 + 说明 + 关闭 */
+    /* 赞赏码原图 1024×1036（自带"多谢老板打赏！"+ 底部金色署名条）→ 只做等比缩放，不裁切 */
+    CGFloat cw = MIN(320, sc.size.width - 40);
+    CGFloat iw = cw - 16;
+    CGFloat ih = iw * 1036.0 / 1024.0;
+    CGFloat ch = 8 + ih + 34;
     UIView *card = [[UIView alloc] initWithFrame:
         CGRectMake((sc.size.width - cw) / 2, (sc.size.height - ch) / 2, cw, ch)];
     card.tag = 9602;
@@ -892,14 +895,7 @@ static UIImage *TTSLoadBallImage(void) {
     card.layer.masksToBounds = YES;
     [mask addSubview:card];
 
-    UILabel *lt = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, cw, 26)];
-    lt.text = @"多谢老板打赏！";
-    lt.textAlignment = NSTextAlignmentCenter;
-    lt.textColor = UIColor.blackColor;
-    lt.font = [UIFont boldSystemFontOfSize:17];
-    [card addSubview:lt];
-
-    UIImageView *qr = [[UIImageView alloc] initWithFrame:CGRectMake(12, 42, cw - 24, cw - 24)];
+    UIImageView *qr = [[UIImageView alloc] initWithFrame:CGRectMake(8, 8, iw, ih)];
     UIImage *qrImg = [UIImage imageWithData:[NSData dataWithBytes:TTS_RES_TIP length:TTS_RES_TIP_LEN]];
     if (qrImg) {
         qr.image = qrImg;
@@ -910,18 +906,18 @@ static UIImage *TTSLoadBallImage(void) {
     qr.userInteractionEnabled = NO;
     [card addSubview:qr];
 
-    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(0, cw + 46, cw, 18)];
-    sub.text = @"长按识别 · 微信收款码";
+    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(0, 8 + ih + 4, cw, 20)];
+    sub.text = @"微信内长按识别 · 赞赏码";
     sub.textAlignment = NSTextAlignmentCenter;
     sub.textColor = [UIColor colorWithWhite:0.45 alpha:1];
     sub.font = [UIFont systemFontOfSize:12];
     [card addSubview:sub];
 
     UIButton *closeB = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeB.frame = CGRectMake(cw - 42, 6, 36, 30);
+    closeB.frame = CGRectMake(cw - 44, 4, 38, 32);
     [closeB setTitle:@"✕" forState:UIControlStateNormal];
     [closeB setTitleColor:[UIColor colorWithWhite:0.4 alpha:1] forState:UIControlStateNormal];
-    closeB.titleLabel.font = [UIFont boldSystemFontOfSize:18];
+    closeB.titleLabel.font = [UIFont boldSystemFontOfSize:19];
     [closeB addTarget:self action:@selector(closeTip) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:closeB];
 
