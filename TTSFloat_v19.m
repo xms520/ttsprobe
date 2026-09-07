@@ -655,8 +655,8 @@ static UIWindow *g_ttsWindow = nil;
     id audioSender = nil;
     @synchronized([NSObject class]) {
         peer = [g_lastToUsr copy];
-        myWxid = [g_myWxid copy];
-        userInfo = g_lastUserInfo;
+        myWxid = [g_lastFromParam copy];
+        userInfo = g_lastUserInfoParam;
         audioSender = g_audioSender;
     }
     if (!peer.length) { self.statusLabel.text = @"先按住说话一次（捕获会话）"; return; }
