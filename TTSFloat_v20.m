@@ -480,7 +480,7 @@ static UIWindow *g_ttsWindow = nil;
 - (BOOL)prefersStatusBarHidden { return YES; }
 @end
 
-@interface TTSFloatView : UIView <UITableViewDataSource, UITableViewDelegate>
+@interface TTSFloatView : UIView <UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UIView *panel;
 @property (nonatomic, strong) UITextView *input;
 @property (nonatomic, strong) UIButton *send;
@@ -491,6 +491,7 @@ static UIWindow *g_ttsWindow = nil;
 - (void)dragPanel:(UIPanGestureRecognizer *)g;
 - (void)showVoiceList;
 - (void)closeVoiceList;
+- (void)maskTapped:(UITapGestureRecognizer *)g;
 - (void)kbWillShow:(NSNotification *)n;
 - (void)kbWillHide:(NSNotification *)n;
 - (void)sendDirect;
@@ -667,10 +668,14 @@ static UIWindow *g_ttsWindow = nil;
     tv.rowHeight = 44;
     [listPanel addSubview:tv];
 
-    /* 点遮罩关闭 */
+    /* 点遮罩关闭——但列表面板要传触摸给表格（v21-fix: 用 hitTest 判定，
+     * 遮罩 tap 不再吃掉表格行的点击，didSelectRowAtIndexPath 才能收到） */
+    UIView *panelRef = listPanel;
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
-        initWithTarget:self action:@selector(closeVoiceList)];
+        initWithTarget:self action:@selector(maskTapped:)];
+    tap.delegate = (id<UIGestureRecognizerDelegate>)self;
     [mask addGestureRecognizer:tap];
+    objc_setAssociatedObject(mask, "maskPanel", panelRef, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     /* 挂到窗口（全屏层级） */
     UIWindow *w = nil;
@@ -688,6 +693,31 @@ static UIWindow *g_ttsWindow = nil;
             if (sub.tag == 9527) [sub removeFromSuperview];
         }
     }
+}
+
+/* v21-fix: 只有关闭按钮/遮罩空白区才关列表；点列表面板内部不关 */
+- (void)maskTapped:(UITapGestureRecognizer *)g {
+    UIView *mask = g.view;
+    UIView *listPanel = objc_getAssociatedObject(mask, "maskPanel");
+    CGPoint loc = [g locationInView:listPanel];
+    BOOL inside = CGRectContainsPoint(listPanel.bounds, loc);
+    if (!inside) [self closeVoiceList];
+}
+
+/* v21-fix: 遮罩 tap 与表格行点击共存——触摸点在列表面板内时放弃识别 */
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldBeRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
+    return NO;
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
+    /* 触摸落在列表面板内 → 不接收，让表格自己处理 didSelectRowAtIndexPath */
+    UIView *mask = gr.view;
+    UIView *listPanel = objc_getAssociatedObject(mask, "maskPanel");
+    if (!listPanel) return YES;
+    CGPoint loc = [touch locationInView:listPanel];
+    return !CGRectContainsPoint(listPanel.bounds, loc);
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 1; }
@@ -821,10 +851,37 @@ static UIWindow *g_ttsWindow = nil;
                     SEL stopSel = NSSelectorFromString(@"StopRecord");
                     @try {
                         ((void (*)(id, SEL))objc_msgSend)(audioSender, stopSel);
-                        TTLog(@"[panel] StopRecord done (waited=%dms) — 微信应已发送", waited);
+                        TTLog(@"[panel] StopRecord done (waited=%dms)", waited);
                     } @catch (NSException *e) {
                         TTLog(@"[panel] StopRecord 异常: %@", e);
                     }
+
+                    /* ③ v21-fix: StopRecord 后必须调真实发送入口
+                     * 微信真实链: OnRecorderEndRecording → SendOriVoiceMsgWithUserData: → prepareSend: → UploadVoiceCDNMgr
+                     * 不调它消息永远卡上传队列（大退才被强制flush）。 */
+                    id userData = nil;
+                    @synchronized([NSObject class]) { userData = g_lastUserInfoParam; }
+                    if (userData) {
+                        SEL sendSel = NSSelectorFromString(@"SendOriVoiceMsgWithUserData:");
+                        if ([audioSender respondsToSelector:sendSel]) {
+                            @try {
+                                BOOL (*sfn)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
+                                BOOL sent = sfn(audioSender, sendSel, userData);
+                                TTLog(@"[panel] SendOriVoiceMsgWithUserData ret=%d", sent);
+                            } @catch (NSException *e) {
+                                TTLog(@"[panel] SendOri 异常: %@", e);
+                            }
+                        } else {
+                            TTLog(@"[panel] SendOriVoiceMsgWithUserData MISS");
+                        }
+                    } else {
+                        TTLog(@"[panel] 无 userData — SendOri 跳过");
+                    }
+
+                    /* ④ 上传异步消化等待（StopRecord+SendOri 后 3s） */
+                    [NSThread sleepForTimeInterval:3.0];
+                    TTLog(@"[panel] 上传等待 3s 完成 — UI 恢复");
+
                     @synchronized([NSObject class]) {
                         g_replaceActive = NO;
                         g_pcmFedDone = NO;
