@@ -157,7 +157,13 @@ static void ts_apply(void) {
     static float last = 0.0f;
     float want = pm_ts_state ? pm_ts_target : 1.0f;
     if (want == last) return;
-    if (!g_set_timescale) { ts_try_init(); if (!g_set_timescale) return; }
+    if (!g_set_timescale || !I_runtime_invoke) {
+        ts_try_init();
+        if (!g_set_timescale || !I_runtime_invoke) {
+            LOG("ts: not ready (cls=%p m=%p inv=%p)\n", g_time_class, g_set_timescale, (void*)I_runtime_invoke);
+            return;
+        }
+    }
     float v = want;
     void* exc = NULL;
     I_runtime_invoke(g_set_timescale, NULL, (void**)&v, &exc);
@@ -404,20 +410,25 @@ static int g_beat_ok = 0;   // v34: install 成功标志（失败则 30s 后重�
 
 // v38: 把一段 C 回调投递到游戏主线程 runloop 执行（光遇 ExecuteLuaAsync 同款）
 // block 捕获：用 C 全局变量中转（block 捕获局部变量在 -fno-objc-arc 下复杂）
-static char g_pending_job = 0;  // 0=无 1=verify+install 2=reinstall 3=ping
+// v10: job 改位掩码（INSTALL=1 REINSTALL=2 PING=4 TS=8）——
+// v9 单槽 job 互相覆盖：ts 脏标记覆盖未执行的 install → 引擎装不上 → 功能全失效+调度错乱
+static volatile char g_pending_job = 0;
+#define JOB_INSTALL   1
+#define JOB_REINSTALL 2
+#define JOB_PING      4
+#define JOB_TS        8
 static volatile int g_ping_pending = 0;
 static void install_beat(void);
 static void run_pending_on_main(void) {
     if (g_pending_job == 0) return;
     int job = g_pending_job; g_pending_job = 0;
-    if (job == 4) {   // 变速：timeScale 应用（主线程）
+    if (job & JOB_TS) {     // 变速：timeScale 应用（主线程）
         ts_try_init();
         ts_apply();
-        return;
     }
     if (!g_L) return;
-    if (job == 3) {
-        // v8: 30s ping —— 在游戏主线程执行（与游戏自身 Lua 串行，绝不竞态）
+    if (job & JOB_PING) {
+        // 30s ping —— 在游戏主线程执行（与游戏自身 Lua 串行，绝不竞态）
         int pr = lua_dostring("return 1");
         const char* ph = getenv("HOME");
         char pp[512];
@@ -426,18 +437,17 @@ static void run_pending_on_main(void) {
         if (pf) { fprintf(pf, "%s\n", pr == 0 ? "alive" : "dead"); fclose(pf); }
         LOG("ping rc=%d (main)\n", pr);
         g_ping_pending = 0;
-        return;
+        if (!(job & (JOB_INSTALL | JOB_REINSTALL))) return;
     }
-    if (job == 1) {
-        int r = lua_dostring("local x = 1 return x");
-        LOG("channel verify rc=%d (0=OK) [main]\n", r);
-        if (r != 0) return;
-    }
+    if (g_beat_ok && (job & JOB_INSTALL) && !(job & JOB_REINSTALL)) return;  // 已装好且非重装
+    int r = lua_dostring("local x = 1 return x");
+    LOG("channel verify rc=%d (0=OK) [main]\n", r);
+    if (r != 0) return;
     install_beat();
 }
 static void post_to_main(void (*unused)(void)) {
     (void)unused;
-    if (!ensure_main_runloop()) { LOG("pm-post: no main runloop yet\n"); g_pending_job = 0; return; }
+    if (!ensure_main_runloop()) { LOG("pm-post: no main runloop yet\n"); return; }  // v10: 保留 job 下轮重试
     p_CFRunLoopPerformBlock(g_main_runloop, p_CommonModes, ^{
         LOG("pm-block-enter\n");
         run_pending_on_main();
@@ -447,7 +457,7 @@ static void post_to_main(void (*unused)(void)) {
 }
 
 static void install_beat_via_runloop(void) {
-    g_pending_job = 1;
+    g_pending_job |= JOB_INSTALL;
     post_to_main(NULL);
 }
 
@@ -540,6 +550,17 @@ static void* worker(void* a) {
         if (g_uf) resolve_syms();
         if (g_uf && !g_L && i > 4) try_get_lua();
 
+        // v10: 变速点击在观测期也要即时响应（v9 点击落在 Phase 1 = 等 30s 才投递）
+        if (g_uf) {
+            static float ts_seen = -1.0f;
+            static int ts_st_seen = -1;
+            if (pm_ts_target != ts_seen || pm_ts_state != ts_st_seen) {
+                ts_seen = pm_ts_target; ts_st_seen = pm_ts_state;
+                g_pending_job |= JOB_TS;
+                post_to_main(NULL);
+            }
+        }
+
         if (g_L && i > 60) break;  // Lua 就绪后停止观测（无 UI 版）
 
         if (i % 10 == 0) {
@@ -583,7 +604,7 @@ static void* worker(void* a) {
             last_ping = time(NULL);
             if (g_L) {
                 g_ping_pending = 1;
-                g_pending_job = 3;   // 3 = ping（run_pending_on_main 在主线程执行）
+                g_pending_job |= JOB_PING;
                 post_to_main(NULL);
                 // 结果稍后由下一轮检查 pm.status 的 ping 行
                 static time_t last_pingchk = 0;
@@ -601,15 +622,15 @@ static void* worker(void* a) {
                             LOG("ping says dead -> re-acquiring\n");
                             g_L = NULL;
                             if (L_getstate) { g_L = L_getstate(); LOG("new L=%p\n", (void*)g_L); }
-                            if (g_L) { g_pending_job = 2; post_to_main(NULL); }
+                            if (g_L) { g_pending_job |= JOB_REINSTALL; post_to_main(NULL); }
                         } else if (!g_beat_ok) {
                             LOG("beat retry (alive but not installed)\n");
-                            g_pending_job = 2; post_to_main(NULL);
+                            g_pending_job |= JOB_REINSTALL; post_to_main(NULL);
                         }
                     }
                 }
             } else {
-                if (L_getstate) { g_L = L_getstate(); if (g_L) { LOG("L re-acquired %p\n",(void*)g_L); g_pending_job = 2; post_to_main(NULL); } }
+                if (L_getstate) { g_L = L_getstate(); if (g_L) { LOG("L re-acquired %p\n",(void*)g_L); g_pending_job |= JOB_REINSTALL; post_to_main(NULL); } }
             }
         }
         // 变速 watch：UI 写 pm_ts_target/pm_ts_state（volatile）后置 job=4；
@@ -620,7 +641,7 @@ static void* worker(void* a) {
             if (pm_ts_target != ts_last_seen || pm_ts_state != ts_state_seen) {
                 ts_last_seen = pm_ts_target;
                 ts_state_seen = pm_ts_state;
-                g_pending_job = 4;
+                g_pending_job |= JOB_TS;
                 post_to_main(NULL);
             }
         }
@@ -1167,7 +1188,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v9 pid=%d\n", getpid());
+        LOG("PMGlass v10 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
