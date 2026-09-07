@@ -82,6 +82,8 @@ static void TTLog(NSString *fmt, ...) {
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dlfcn.h>
+#include <ucontext.h>
 static int g_crashFd = -1;
 static void TTSCrashHandler(int sig, siginfo_t *info, void *uc) {
     char buf[256];
@@ -90,7 +92,8 @@ static void TTSCrashHandler(int sig, siginfo_t *info, void *uc) {
                      (void *)((ucontext_t *)uc ? ((ucontext_t *)uc)->uc_mcontext->__ss.__pc : NULL));
     if (g_crashFd >= 0) write(g_crashFd, buf, (size_t)n);
     void *frames[48];
-    int cnt = backtrace(frames, 48);
+    int cnt = 0;
+    @try { cnt = backtrace(frames, 48); } @catch(...) { cnt = 0; }
     if (g_crashFd >= 0) backtrace_symbols_fd(frames, cnt, g_crashFd);
     _exit(128 + sig);
 }
@@ -109,12 +112,11 @@ static void TTSInstallCrashGuards(void) {
     sigaction(SIGABRT, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
-    NSSetUncaughtExceptionHandler ^(NSException *e) {
-        TTLog(@"[CRASH-EXC] %@ — %@\n%@", e.name, e.reason, e.callStackSymbols);
-    };
+    NSSetUncaughtExceptionHandler(^(NSException *e) {
+        TTLog(@"[CRASH-EXC] %@ - %@\n%@", e.name, e.reason, e.callStackSymbols);
+    });
 }
 
-#include <dlfcn.h>
 
 /* ==================== TTS PCM 缓存（hook 替换数据源） ==================== */
 static NSString *g_voiceName = K_DEFAULT_VOICE;
@@ -1004,7 +1006,7 @@ static UIWindow *g_ttsWindow = nil;
                 /* ② 轮询等待：PCM 喂完后（g_pcmFedDone）+ 800ms 余量再 Stop
                  *    （Stop 太早会截断数据 → 微信等完整数据 → 转圈） */
                 __block int waited = 0;
-                dispatch_async(dispatch_get_global_queue(QOS_DEFAULT, 0), ^{
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
                     /* v22: 实时节奏喂数 → 上限 = 15s + 2×语音时长（48kHz 采集时喂完需 3× 语音时长） */
                     int capMs = 15000 + 2 * (int)ms;
                     while (waited < capMs) {
