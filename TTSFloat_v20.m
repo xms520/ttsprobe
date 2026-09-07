@@ -83,13 +83,15 @@ static void TTLog(NSString *fmt, ...) {
 #include <unistd.h>
 #include <fcntl.h>
 #include <dlfcn.h>
-#include <ucontext.h>
 static int g_crashFd = -1;
+static void TTSCrashLogException(NSException *e) {
+    TTLog(@"[CRASH-EXC] %@ - %@\n%@", e.name, e.reason, e.callStackSymbols);
+}
 static void TTSCrashHandler(int sig, siginfo_t *info, void *uc) {
+    (void)uc;
     char buf[256];
-    int n = snprintf(buf, sizeof(buf), "\n[CRASH] sig=%d addr=%p pc=%p\n",
-                     sig, info ? info->si_addr : NULL,
-                     (void *)((ucontext_t *)uc ? ((ucontext_t *)uc)->uc_mcontext->__ss.__pc : NULL));
+    int n = snprintf(buf, sizeof(buf), "\n[CRASH] sig=%d addr=%p\n",
+                     sig, info ? info->si_addr : NULL);
     if (g_crashFd >= 0) write(g_crashFd, buf, (size_t)n);
     void *frames[48];
     int cnt = 0;
@@ -112,9 +114,7 @@ static void TTSInstallCrashGuards(void) {
     sigaction(SIGABRT, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
-    NSSetUncaughtExceptionHandler(^(NSException *e) {
-        TTLog(@"[CRASH-EXC] %@ - %@\n%@", e.name, e.reason, e.callStackSymbols);
-    });
+    NSSetUncaughtExceptionHandler(&TTSCrashLogException);
 }
 
 
