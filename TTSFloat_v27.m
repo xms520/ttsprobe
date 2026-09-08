@@ -404,6 +404,32 @@ static NSUInteger g_pcmOffset = 0;       /* 已喂位置 */
 static BOOL g_replaceActive = NO;        /* 替换开关 */
 static BOOL g_pcmFedDone = NO;           /* TTS 数据已全部喂进管线（StopRecord 时机依据） */
 
+/* ==================== v27: 会话持久化（免捕捉直接发送） ====================
+ * 捕捉一次后：from/myWxid、toUser、userInfo 快照落 NSUserDefaults。
+ * 下次启动微信不捕捉直接发（同一会话）；换会话未捕捉则回落上次参数。 */
+static NSString *const kSessionFromKey = @"TTSFloatFrom";
+static NSString *const kSessionToKey   = @"TTSFloatTo";
+static NSString *const kSessionInfoKey = @"TTSFloatInfo";
+
+static void TTSSaveSession(NSString *from, NSString *to, NSDictionary *info) {
+    if (from.length) [NSUserDefaults.standardUserDefaults setObject:from forKey:kSessionFromKey];
+    if (to.length)   [NSUserDefaults.standardUserDefaults setObject:to   forKey:kSessionToKey];
+    if (info.count) {
+        NSError *e = nil;
+        NSData *jd = [NSJSONSerialization dataWithJSONObject:info options:0 error:&e];
+        if (jd && !e) [NSUserDefaults.standardUserDefaults setObject:[jd base64EncodedStringWithOptions:0]
+                                                            forKey:kSessionInfoKey];
+    }
+}
+static NSDictionary *TTSLoadSessionInfo(void) {
+    NSString *b64 = [NSUserDefaults.standardUserDefaults stringForKey:kSessionInfoKey];
+    if (!b64.length) return nil;
+    NSData *jd = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+    if (!jd) return nil;
+    id o = [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil];
+    return [o isKindOfClass:[NSDictionary class]] ? o : nil;
+}
+
 /* ==================== v20: 录音启动参数捕获（面板直接发送的关键） ====================
  * StartRecordFrom:ToUser:UserInfo: 真实签名 B40@0:8@16@24@32（3个无类名对象参）。
  * 传 chatVC 崩（身份不对）。hook 它【只观察不修改】——用户按住说话一次，
@@ -433,7 +459,6 @@ static void InstallStartRecordObserver(void) {
                 @synchronized([NSObject class]) {
                     g_lastFromParam = from;
                     g_lastUserInfoParam = userInfo;
-                    if (toUser) g_lastToUsr = [toUser copy];
                 }
                 /* v27: 持久化（跨启动直接可用；换会话兜底） */
                 TTSSaveSession(from, toUser, [userInfo isKindOfClass:[NSDictionary class]] ? userInfo : nil);
