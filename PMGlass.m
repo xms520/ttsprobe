@@ -50,7 +50,7 @@ static void* (*I_thread_attach)(Il2CppDomain*);
 static void* g_uf = NULL;
 static lua_State* g_L = NULL;
 
-static volatile int f_godmode = 0, f_onehit = 0, f_dump = 0;
+static volatile int f_godmode = 0, f_onehit = 0, f_speed = 0, f_dump = 0;   // f_speed: 0=关 1=2x 2=3x 3=½x
 static volatile int f_probe = 0;
 static int g_dump_done = 0, g_probe_done = 0;  // 一次性动作防重入
 static FILE* g_log = NULL;
@@ -127,7 +127,7 @@ static int lua_dostring(const char* code) {
 
 static void sync_cfg(void) {
     // v11 前：开关仅记录状态（Lua 侧 hook 等全局表分析后再接）
-    LOG("cfg sync: god=%d onehit=%d\n", f_godmode, f_onehit);
+    LOG("cfg sync: god=%d onehit=%d speed=%d\n", f_godmode, f_onehit, f_speed);
 }
 
 static void try_get_lua(void) {
@@ -187,18 +187,23 @@ static void read_flags(void) {
     FILE* f = fopen(path, "r");
     if (!f) return;
     char line[128];
-    int newgod = f_godmode, newhit = f_onehit, newdump = 0, newprobe = 0;
+    int newgod = f_godmode, newhit = f_onehit, newspd = f_speed, newdump = 0, newprobe = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "god=1", 5) == 0) newgod = 1;
         else if (strncmp(line, "god=0", 5) == 0) newgod = 0;
         else if (strncmp(line, "onehit=1", 8) == 0) newhit = 1;
         else if (strncmp(line, "onehit=0", 8) == 0) newhit = 0;
+        else if (strncmp(line, "speed=3", 7) == 0) newspd = 2;
+        else if (strncmp(line, "speed=2", 7) == 0) newspd = 1;
+        else if (strncmp(line, "speed=0.5", 9) == 0) newspd = 3;
+        else if (strncmp(line, "speed=1", 7) == 0) newspd = 0;
         else if (strncmp(line, "dump=1", 6) == 0) newdump = 1;
         else if (strncmp(line, "probe=1", 7) == 0) newprobe = 1;
     }
     fclose(f);
     if (newgod != f_godmode) { f_godmode = newgod; LOG("flag: god=%d\n", newgod); sync_cfg(); }
     if (newhit != f_onehit) { f_onehit = newhit; LOG("flag: onehit=%d\n", newhit); sync_cfg(); }
+    if (newspd != f_speed)  { f_speed = newspd; LOG("flag: speed=%d (%s)\n", newspd, newspd==0?"off":newspd==1?"2x":newspd==2?"3x":"half"); sync_cfg(); }
     if (newprobe && !g_probe_done) {
         g_probe_done = 1;
         f_probe = 1;
@@ -511,7 +516,7 @@ static void* worker(void* a) {
         char fp0[512];
         snprintf(fp0, sizeof(fp0), "%s/Documents/pm.flags", ph0 ? ph0 : "/var/mobile");
         remove(fp0);
-        f_godmode = 0; f_onehit = 0; f_dump = 0;
+        f_godmode = 0; f_onehit = 0; f_speed = 0; f_dump = 0;
     }
     int hb = 0;
     for (int i = 0; i < 1440; i++) {
@@ -609,8 +614,9 @@ static void pm_write_flags(void) {
     snprintf(path, sizeof(path), "%s/Documents/pm.flags", p ? p : "/var/mobile");
     FILE* f = fopen(path, "w");
     if (f) {
-        fprintf(f, "god=%d\nonehit=%d\n",
-                (int)f_godmode, (int)f_onehit);
+        fprintf(f, "god=%d\nonehit=%d\nspeed=%s\n",
+                (int)f_godmode, (int)f_onehit,
+                f_speed==1?"2":f_speed==2?"3":f_speed==3?"0.5":"1");
         fclose(f);
     }
 }
