@@ -435,34 +435,39 @@ static BOOL TTSLookLikeSessionId(NSString *s) {
 static NSString *TTSPeerFromChatVC(id vc) {
     if (!vc) return nil;
     static BOOL dumpedIvars = NO;
+    /* v28e: 本类 ivar 可能为空（混合类字段在父类）→ 沿父类链逐层扫（每层 KVC 安全读）。
+     * 跳过系统层（UIViewController/UIViewController 以下不扫，没意义）。 */
     Class c = object_getClass(vc);
-    if (!c) return nil;
-    unsigned int n = 0;
-    Ivar *ivs = class_copyIvarList(c, &n);
-    if (!ivs) return nil;
-    NSString *found = nil;
-    for (unsigned int i = 0; i < n && i < 200; i++) {
-        const char *nmC = ivar_getName(ivs[i]);
-        if (!nmC) continue;
-        NSString *key = [NSString stringWithUTF8String:nmC];
-        if (!key.length) continue;
-        if (!dumpedIvars && i < 40) TTLog(@"[ivar] %@", key);   /* 一次性 dump（诊断用） */
-        @try {
-            id v = [vc valueForKey:key];   /* KVC：安全读，异常走 @catch */
-            NSString *sv = TTSStringify(v);
-            if (sv.length && TTSLookLikeSessionId(sv)) {
-                if (!dumpedIvars) {
-                    TTLog(@"[chat] 命中 ivar=%@ 值=%@", key, sv);
-                    dumpedIvars = YES;
+    int levels = 0;
+    while (c && c != [NSObject class] && levels < 8) {
+        unsigned int n = 0;
+        Ivar *ivs = class_copyIvarList(c, &n);
+        if (!ivs) { c = class_getSuperclass(c); levels++; continue; }
+        for (unsigned int i = 0; i < n && i < 300; i++) {
+            const char *nmC = ivar_getName(ivs[i]);
+            if (!nmC) continue;
+            NSString *key = [NSString stringWithUTF8String:nmC];
+            if (!key.length) continue;
+            if (!dumpedIvars) TTLog(@"[ivar] %@", key);   /* dump 不截断（定位用） */
+            @try {
+                id v = [vc valueForKey:key];   /* KVC：安全读，异常走 @catch */
+                NSString *sv = TTSStringify(v);
+                if (sv.length && TTSLookLikeSessionId(sv)) {
+                    if (!dumpedIvars) {
+                        TTLog(@"[chat] 命中 ivar=%@ 值=%@", key, sv);
+                        dumpedIvars = YES;
+                    }
+                    free(ivs);
+                    return sv;
                 }
-                found = sv;
-                break;
-            }
-        } @catch (NSException *e) { }
+            } @catch (NSException *e) { }
+        }
+        free(ivs);
+        if (!dumpedIvars) { TTLog(@"[ivar] ---- 以上为 %s 层 ----", class_getName(c)); dumpedIvars = YES; }
+        c = class_getSuperclass(c);
+        levels++;
     }
-    if (ivs) free(ivs);
-    if (!dumpedIvars) dumpedIvars = YES;
-    return found;
+    return nil;
 }
 
 /* 遍历 VC 树，返回第一个"像聊天页"的 VC。
@@ -484,6 +489,7 @@ static BOOL TTSLooksLikeChatVC(NSString *cn) {
 static id TTSFindChatVC(void) {
     static BOOL dumped = NO;
     id best = nil;
+    /* v28e: NewMainFrameViewController（聊天容器）也作为候选（会话 id 可能挂在容器上） */
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
         UIViewController *root = w.rootViewController;
         if (!root) continue;
@@ -493,7 +499,7 @@ static id TTSFindChatVC(void) {
             [stack removeLastObject];
             NSString *cn = NSStringFromClass([cur class]);
             /* v28b: 宽匹配 → 拿到候选先用 ivar 探测验证，能读出会话 id 才算数 */
-            if (TTSLooksLikeChatVC(cn)) {
+            if (TTSLooksLikeChatVC(cn) || [cn isEqualToString:@"NewMainFrameViewController"]) {
                 NSString *peer = TTSPeerFromChatVC(cur);
                 if (peer.length) { dumped = YES; return cur; }
                 if (!best) best = cur;
