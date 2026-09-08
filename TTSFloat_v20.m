@@ -423,6 +423,12 @@ static BOOL TTSLookLikeSessionId(NSString *s) {
     if ([s hasPrefix:@"wxid_"]) return YES;
     if ([s hasSuffix:@"@chatroom"]) return YES;
     if ([s hasPrefix:@"gh_"] && s.length > 10) return YES;
+    /* v29b: 企业微信/其他格式——无空格、无尖括号、非纯数字的 id 也接受
+     *（覆盖 wxwork_/wm_/openim 等未知前缀，宁可多收不漏收，打日志确认） */
+    if ([s rangeOfString:@" "].location == NSNotFound &&
+        [s rangeOfString:@"<"].location == NSNotFound &&
+        ![NSCharacterSet.decimalDigitCharacterSet isSupersetOfSet:
+            [NSCharacterSet characterSetWithCharactersInString:s]]) return YES;
     return NO;
 }
 /* v28d: 崩溃修复——v28c 的 object_getIvar 全量裸扫 + 对象下钻会踩到
@@ -459,6 +465,20 @@ static NSString *TTSPeerFromChatVC(id vc) {
                     }
                     free(ivs);
                     return sv;
+                }
+                /* v29b: 群聊/企业微信兜底——固定键 KVC 探测（聊天逻辑层常见字段） */
+                if (v && ![v isKindOfClass:[NSString class]]) {
+                    for (NSString *fixedKey in @[@"m_nsTalker", @"m_nsFromUsr", @"m_nsChatName",
+                                                 @"talker", @"m_nsUserName", @"nsTalker"]) {
+                        @try {
+                            NSString *fv = TTSStringify([v valueForKey:fixedKey]);
+                            if (fv.length && TTSLookLikeSessionId(fv)) {
+                                TTLog(@"[chat] 命中固定键 %@.%@ 值=%@", key, fixedKey, fv);
+                                free(ivs);
+                                return fv;
+                            }
+                        } @catch (NSException *e) { }
+                    }
                 }
                 /* v28f: KVC 安全下钻——值是对象（非 view/字符串/数据）→ 用 KVC 扫它的 ivar
                  * （v28c 崩在 object_getIvar 裸读；这里全部走 valueForKey，不裸读） */
