@@ -125,57 +125,140 @@ static void TTSInstallCrashGuards(void) {
     NSSetUncaughtExceptionHandler(&TTSCrashLogException);
 }
 
-/* 只保留 "N. 名称" 形式的行（去掉分类标题等噪声），去重保序 */
+/* ---------- v25b: 宽松解析（兼容 "N. " / "N、" / "N)" / 纯换行无编号 / HTML 标签） ---------- */
+static NSString *TTSTrim(NSString *s) {
+    return [s stringByTrimmingCharactersInSet:
+              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+/* 名称里允许中文/字母数字/空格/常见符号；拒绝还带 HTML 标签的行 */
+static BOOL TTSVoiceNameOK(NSString *n) {
+    if (n.length < 1 || n.length > 24) return NO;
+    if ([n rangeOfString:@"<"].location != NSNotFound) return NO;
+    if ([n rangeOfString:@"http"].location != NSNotFound) return NO;
+    return YES;
+}
+static void TTSAddVoice(NSMutableArray *out, NSMutableSet *seen, NSString *name) {
+    NSString *n = TTSTrim(name);
+    if (!TTSVoiceNameOK(n)) return;
+    NSString *key = [n lowercaseString];
+    if ([seen containsObject:key]) return;
+    [seen addObject:key];
+    [out addObject:n];
+}
 static NSArray *TTSParseVoiceList(NSString *text) {
     NSMutableArray *out = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
+    NSArray<NSString *> *seps = @[ @".", @"、", @")", @"）", @":", @"：" ];
     NSArray *lines = [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
-    NSCharacterSet *sp = [NSCharacterSet whitespaceAndNewlineCharacterSet];
     for (NSString *raw in lines) {
-        NSString *ln = [raw stringByTrimmingCharactersInSet:sp];
+        NSString *ln = TTSTrim(raw);
         if (ln.length < 2) continue;
-        NSRange dot = [ln rangeOfString:@"."];
-        if (dot.location == NSNotFound || dot.location == 0 || dot.location > 4) continue;
-        NSString *numPart = [ln substringToIndex:dot.location];
-        if (![numPart stringByTrimmingCharactersInSet:NSCharacterSet.decimalDigitCharacterSet].length) continue;
-        NSString *name = [[ln substringFromIndex:dot.location + 1] stringByTrimmingCharactersInSet:sp];
-        if (name.length == 0) continue;
-        NSString *key = [name lowercaseString];
-        if ([seen containsObject:key]) continue;
-        [seen addObject:key];
-        [out addObject:name];
+        NSUInteger d = 0;
+        unichar c0 = [ln characterAtIndex:0];
+        if (c0 < '0' || c0 > '9') continue;
+        while (d < ln.length && d < 6 &&
+               [[NSCharacterSet decimalDigitCharacterSet] characterIsMember:[ln characterAtIndex:d]]) d++;
+        if (d == 0 || d > 5) continue;
+        NSString *rest = [ln substringFromIndex:d];
+        for (NSString *sep in seps) {
+            if ([rest hasPrefix:sep]) { TTSAddVoice(out, seen, [rest substringFromIndex:sep.length]); break; }
+        }
+    }
+    /* 兜底：无编号（纯换行一行一个名字）——取前 800 行 */
+    if (out.count < 5) {
+        [out removeAllObjects]; [seen removeAllObjects];
+        NSUInteger n = 0;
+        for (NSString *raw in lines) {
+            NSString *ln = TTSTrim(raw);
+            if (ln.length == 0 || ln.length > 24) continue;
+            if ([ln rangeOfString:@"<"].location != NSNotFound) continue;
+            TTSAddVoice(out, seen, ln);
+            if (++n >= 800) break;
+        }
     }
     return out;
+}
+/* 失败时打印正文样本（转义换行），一次定位问题 */
+static NSString *TTSTextSample(NSString *s, NSUInteger n) {
+    if (s.length == 0) return @"(空)";
+    NSString *t = [s substringToIndex:MIN(n, s.length)];
+    t = [t stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+    t = [t stringByReplacingOccurrencesOfString:@"\r" withString:@"\\r"];
+    return t;
+}
+/* 多编码兜底：UTF8 → GB18030 → ISO Latin → UTF16 */
+static NSString *TTSDecodeBody(NSData *data) {
+    if (!data.length) return nil;
+    NSStringEncoding encs[] = { NSUTF8StringEncoding,
+                                CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000),
+                                NSISOLatin1StringEncoding,
+                                NSUTF16StringEncoding };
+    for (int i = 0; i < 4; i++) {
+        NSString *s = [[NSString alloc] initWithData:data encoding:encs[i]];
+        if (s.length) return s;
+    }
+    return nil;
+}
+
+/* ---------- v25b: 拉取（3 次重试 + Referer/UA + 完整诊断日志） ---------- */
+static void TTSVoiceTry(NSInteger attempt, void (^done)(BOOL ok, NSUInteger n)) {
+    NSMutableURLRequest *req = [NSMutableURLRequest
+        requestWithURL:[NSURL URLWithString:K_VOICE_ENDPOINT]
+          cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:30];
+    [req setValue:@"https://www.tiax.pw/" forHTTPHeaderField:@"Referer"];
+    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+          forHTTPHeaderField:@"User-Agent"];
+    [req setValue:@"text/plain,text/html,*/*" forHTTPHeaderField:@"Accept"];
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSData *rData = nil; __block NSURLResponse *rResp = nil; __block NSError *rErr = nil;
+    NSURLSessionDataTask *t = [NSURLSession.sharedSession
+        dataTaskWithRequest:req
+        completionHandler:^(NSData *d, NSURLResponse *resp, NSError *e) {
+            rData = d; rResp = resp; rErr = e;
+            dispatch_semaphore_signal(sem);
+        }];
+    [t resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(35 * NSEC_PER_SEC)));
+
+    NSInteger status = [rResp isKindOfClass:[NSHTTPURLResponse class]] ? (NSInteger)((NSHTTPURLResponse *)rResp).statusCode : -1;
+    NSString *text = TTSDecodeBody(rData);
+    NSArray *list = text.length ? TTSParseVoiceList(text) : nil;
+
+    if (list.count > 0) {
+        g_voices = list;
+        g_voiceFetchState = 2;
+        @synchronized([NSObject class]) {
+            if (g_voiceName.length == 0 || ![list containsObject:g_voiceName]) {
+                g_voiceName = K_DEFAULT_VOICE;   /* 旧音色不在新表里 → 回落默认 */
+            }
+        }
+        TTLog(@"[voice-api] ok n=%lu status=%ld bytes=%lu 首个=%@",
+              (unsigned long)list.count, (long)status, (unsigned long)rData.length, list.firstObject);
+        if (done) done(YES, list.count);
+        return;
+    }
+
+    TTLog(@"[voice-api] fail try=%d err=%@ status=%ld bytes=%lu textLen=%lu sample=%@",
+          (int)attempt, rErr.localizedDescription ?: @"nil", (long)status,
+          (unsigned long)rData.length, (unsigned long)text.length, TTSTextSample(text, 300));
+    if (attempt < 2) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            TTSVoiceTry(attempt + 1, done);
+        });
+        return;
+    }
+    g_voiceFetchState = -1;
+    TTLog(@"[voice-api] 放弃：用内置音色表（点列表右上\"重新加载\"可再试）");
+    if (done) done(NO, 0);
 }
 
 static void TTSFetchVoices(void (^done)(BOOL ok, NSUInteger n)) {
     g_voiceFetchState = 1;
-    NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:K_VOICE_ENDPOINT]
-                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                     timeoutInterval:30];
-    NSURLSessionDataTask *t = [NSURLSession.sharedSession
-        dataTaskWithRequest:req
-        completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
-            NSString *s = (data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil);
-            NSArray *list = s.length ? TTSParseVoiceList(s) : nil;
-            if (e || list.count == 0) {
-                g_voiceFetchState = -1;
-                TTLog(@"[voice-api] 失败 err=%@ len=%lu", e.localizedDescription ?: @"nil", (unsigned long)s.length);
-                if (done) done(NO, 0);
-                return;
-            }
-            g_voices = list;
-            g_voiceFetchState = 2;
-            @synchronized([NSObject class]) {
-                if (g_voiceName.length == 0 || ![list containsObject:g_voiceName]) {
-                    /* 旧选中的音色不在新列表里 → 落到列表第一个 */
-                    g_voiceName = K_DEFAULT_VOICE;   /* 旧音色不在新表里 → 回落默认 */
-                }
-            }
-            TTLog(@"[voice-api] 拉到 %lu 个音色，首个=%@", (unsigned long)list.count, list.firstObject);
-            if (done) done(YES, list.count);
-        }];
-    [t resume];
+    /* ⚠️ 重试内部用信号量等待，绝不能在主线程跑 */
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        TTSVoiceTry(0, done);
+    });
 }
 
 static void TTSInitVoicesIfNeeded(void) {
