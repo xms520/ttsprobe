@@ -56,7 +56,8 @@ static NSString *const kTTSVoiceKey = @"TTSFloatVoiceName";
  *    再点一次音色行会重新拉；合成时用当前选中名（默认 K_DEFAULT_VOICE）。 */
 #define K_VOICE_ENDPOINT @"https://www.tiax.pw/API/ys.php"
 
-static NSArray *g_voices = nil;          /* 全量音色（去重保序） */
+static NSArray *g_voices = nil;          /* 全量音色名（去重保序，仅显示/存储用） */
+static NSArray *g_voiceIDs = nil;        /* 与 g_voices 同序的数字 ID（合成请求实际用） */
 static NSArray *g_voiceFilter = nil;     /* 搜索过滤结果（nil = 不过滤） */
 static NSInteger g_voiceFetchState = 0;  /* 0 未拉取 / 1 进行中 / 2 成功 / -1 失败 */
 static BOOL g_voiceFetchInited = NO;
@@ -137,14 +138,17 @@ static BOOL TTSVoiceNameOK(NSString *n) {
     if ([n rangeOfString:@"http"].location != NSNotFound) return NO;
     return YES;
 }
-static void TTSAddVoice(NSMutableArray *out, NSMutableSet *seen, NSString *name) {
+static void TTSAddVoice(NSMutableArray *out, NSMutableArray *ids, NSMutableSet *seen,
+                        NSString *name, NSString *vid) {
     NSString *n = TTSTrim(name);
     if (!TTSVoiceNameOK(n)) return;
     NSString *key = [n lowercaseString];
     if ([seen containsObject:key]) return;
     [seen addObject:key];
     [out addObject:n];
+    [ids addObject:vid.length ? vid : [NSString stringWithFormat:@"%lu", (unsigned long)out.count]];
 }
+static NSArray *g_lastParsedIDs = nil;   /* TTSParseVoiceList 的 ID 伴随输出 */
 static NSArray *TTSParseVoiceList(NSString *raw0) {
     /* 万一是 HTML：去标签 + 实体还原（<br> 转换行），再按行解析 */
     NSString *text = raw0;
@@ -160,6 +164,7 @@ static NSArray *TTSParseVoiceList(NSString *raw0) {
         text = [text stringByReplacingOccurrencesOfString:@"<[^>]+>" withString:@"\n" options:NSRegularExpressionSearch range:NSMakeRange(0, text.length)];
     }
     NSMutableArray *out = [NSMutableArray array];
+    NSMutableArray *ids = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     NSArray<NSString *> *seps = @[ @".", @"、", @")", @"）", @":", @"：" ];
     NSArray *lines = [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
@@ -172,23 +177,25 @@ static NSArray *TTSParseVoiceList(NSString *raw0) {
         while (d < ln.length && d < 6 &&
                [[NSCharacterSet decimalDigitCharacterSet] characterIsMember:[ln characterAtIndex:d]]) d++;
         if (d == 0 || d > 5) continue;
+        NSString *vid = [ln substringToIndex:d];
         NSString *rest = [ln substringFromIndex:d];
         for (NSString *sep in seps) {
-            if ([rest hasPrefix:sep]) { TTSAddVoice(out, seen, [rest substringFromIndex:sep.length]); break; }
+            if ([rest hasPrefix:sep]) { TTSAddVoice(out, ids, seen, [rest substringFromIndex:sep.length], vid); break; }
         }
     }
     /* 兜底：无编号（纯换行一行一个名字）——取前 800 行 */
     if (out.count < 5) {
-        [out removeAllObjects]; [seen removeAllObjects];
+        [out removeAllObjects]; [ids removeAllObjects]; [seen removeAllObjects];
         NSUInteger n = 0;
         for (NSString *raw in lines) {
             NSString *ln = TTSTrim(raw);
             if (ln.length == 0 || ln.length > 24) continue;
             if ([ln rangeOfString:@"<"].location != NSNotFound) continue;
-            TTSAddVoice(out, seen, ln);
+            TTSAddVoice(out, ids, seen, ln, [NSString stringWithFormat:@"%lu", (unsigned long)(n + 1)]);
             if (++n >= 800) break;
         }
     }
+    g_lastParsedIDs = ids;
     return out;
 }
 /* 失败时打印正文样本（转义换行），一次定位问题 */
@@ -239,6 +246,7 @@ static void TTSVoiceTry(NSInteger attempt, void (^done)(BOOL ok, NSUInteger n)) 
 
     if (list.count > 0) {
         g_voices = list;
+        g_voiceIDs = g_lastParsedIDs;
         g_voiceFetchState = 2;
         @synchronized([NSObject class]) {
             if (g_voiceName.length == 0 || ![list containsObject:g_voiceName]) {
@@ -296,6 +304,23 @@ static NSString *TTSCurVoice(void) {
 static void TTSSetVoice(NSString *name) {
     @synchronized([NSObject class]) { g_voiceName = name; }
     [NSUserDefaults.standardUserDefaults setObject:name forKey:kTTSVoiceKey];
+}
+/* 名称 → 数字 ID（合成请求真正用的参数）。
+ * 实测结论：yuyin2.php 的 voice 只认【序号 ID】，传中文名会被静默忽略、
+ * 全部按 id=1（TVB女）合成 —— 这就是"换音色没反应、始终一个音色"的根因。 */
+static NSString *TTSVoiceIDForName(NSString *name) {
+    NSArray *vs = nil, *ids = nil;
+    @synchronized([NSObject class]) { vs = g_voices; ids = g_voiceIDs; }
+    if (!name.length) return @"1";
+    if (vs.count && ids.count == vs.count) {
+        NSUInteger i = [vs indexOfObject:name];
+        if (i != NSNotFound && i < ids.count) return ids[i];
+    }
+    /* 兜底：名字数字开头就直接用 */
+    if ([[name substringToIndex:1] isEqualToString:@""] == NO &&
+        [[NSCharacterSet decimalDigitCharacterSet] characterIsMember:[name characterAtIndex:0]] &&
+        name.intValue > 0) return name;
+    return @"1";
 }
 
 
@@ -725,7 +750,7 @@ static void TTSDownloadAudio(NSString *audioURL, void (^done)(NSData *audio, NSE
 }
 
 static void RequestTTSOnce(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
-    NSString *v = voice ? voice : K_DEFAULT_VOICE;
+    NSString *v = TTSVoiceIDForName(voice);   /* ⚠️ 接口只认数字 ID，不认中文名 */
     NSString *k = TiaxKey();
     if (k.length == 0) { done(nil, [NSError errorWithDomain:@"TTS" code:6 userInfo:@{NSLocalizedDescriptionKey:@"key未配置"}]); return; }
     NSString *urlStr = [NSString stringWithFormat:@"%@?text=%@&voice=%@&apikey=%@",
@@ -1333,6 +1358,7 @@ static UIImage *TTSLoadBallImage(void) {
     self.statusLabel.text = @"合成中…";
     [self.spinner startAnimating];
     NSString *voice = TTSCurVoice();
+    TTLog(@"[tts] 音色 "%@" -> voice id=%@", voice, TTSVoiceIDForName(voice));
 
     RequestTTS(text, voice, ^(NSData *audio, NSError *error) {
         if (error) {
