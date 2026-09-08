@@ -133,7 +133,10 @@ static NSArray *TTSObfTable(void) {
         @"7d495855536d4959495972594b75524c4948"  /* sel */,
         @"6f485d4e486e595f534e587a4e5351066853694f594e06694f594e75525a5306"  /* sel */,
         @"6f595258734e556a53555f59714f5b6b554854694f594e785d485d06"  /* sel */
-        ]; });
+,
+        @"48594448"  /* text */,
+        @"4a53555f59"  /* voice */,
+        @"5d4c55575945"  /* apikey */        ]; });
     return t;
 }
 static NSString *TTSCls(int i) { return TTSXorHex([TTSObfTable()[i] UTF8String], 0x5A); }
@@ -826,8 +829,10 @@ static void RequestTTSOnce(NSString *text, NSString *voice, void (^done)(NSData 
     NSString *v = TTSVoiceIDForName(voice);   /* ⚠️ 接口只认数字 ID，不认中文名 */
     NSString *k = TiaxKey();
     if (k.length == 0) { done(nil, [NSError errorWithDomain:@"TTS" code:6 userInfo:@{NSLocalizedDescriptionKey:@"key未配置"}]); return; }
-    NSString *urlStr = [NSString stringWithFormat:@"%@?text=%@&voice=%@&apikey=%@",
-                        TTSEndpoint(), TTSEncode(text), TTSEncode(v), TTSEncode(k)];
+    /* v26: 参数名拼装（binary 里搜不到 ?text=&voice=&apikey= 模板） */
+    NSString *urlStr = [TTSEndpoint() stringByAppendingString:
+        [NSString stringWithFormat:@"?%@=%@&%@=%@&%@=%@",
+         TTCSel(10), TTSEncode(text), TTCSel(11), TTSEncode(v), TTCSel(12), TTSEncode(k)]];
     NSURL *url = [NSURL URLWithString:urlStr];
     if (!url) { done(nil, [NSError errorWithDomain:@"TTS" code:1 userInfo:@{NSLocalizedDescriptionKey:@"URL无效"}]); return; }
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
