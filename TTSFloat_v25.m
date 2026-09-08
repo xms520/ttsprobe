@@ -1358,7 +1358,7 @@ static UIImage *TTSLoadBallImage(void) {
     self.statusLabel.text = @"合成中…";
     [self.spinner startAnimating];
     NSString *voice = TTSCurVoice();
-    TTLog(@"[tts] 音色 "%@" -> voice id=%@", voice, TTSVoiceIDForName(voice));
+    TTLog(@"[tts] 音色 \"%@\" -> voice id=%@", voice, TTSVoiceIDForName(voice));
 
     RequestTTS(text, voice, ^(NSData *audio, NSError *error) {
         if (error) {
