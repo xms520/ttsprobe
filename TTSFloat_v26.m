@@ -414,13 +414,13 @@ static void InstallStartRecordObserver(void) {
         if (!cls) return;
         SEL sel = NSSelectorFromString(TTCSel(8));
         Method m = class_getInstanceMethod(cls, sel);
-        if (!m) { TTLog(@"[obs] StartRecordFrom MISS"); return; }
+        if (!m) { TTLog(@"[obs] start MISS"); return; }
         const char *types = method_getTypeEncoding(m);
-        TTLog(@"[obs] StartRecordFrom types=%s", types ? types : "?");
+        TTLog(@"[obs] start types=%s", types ? types : "?");
         IMP oldImp = method_getImplementation(m);
         IMP newImp = imp_implementationWithBlock(^BOOL(id self, id from, id toUser, id userInfo) {
             @autoreleasepool {
-                TTLog(@"[obs] StartRecordFrom: from=%@(%@) toUser=%@(%@) userInfo=%@",
+                TTLog(@"[obs] start: from=%@(%@) to=%@(%@) info=%@",
                       from ? NSStringFromClass([from class]) : @"nil",
                       from ? [from description] : @"-",
                       toUser ? NSStringFromClass([toUser class]) : @"nil",
@@ -434,7 +434,7 @@ static void InstallStartRecordObserver(void) {
             return ((BOOL (*)(id, SEL, id, id, id))oldImp)(self, sel, from, toUser, userInfo);
         });
         method_setImplementation(m, newImp);
-        TTLog(@"[obs] StartRecordFrom observer installed");
+        TTLog(@"[obs] installed");
     });
 }
 
@@ -571,7 +571,7 @@ static void InstallPrepareSendCapture(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class cls = NSClassFromString(TTSCls(0));
-        if (!cls) { TTLog(@"[capture] AudioSender MISS"); return; }
+        if (!cls) { TTLog(@"[capture] cls MISS"); return; }
         SEL sel = NSSelectorFromString(TTCSel(0));
         Method m = class_getInstanceMethod(cls, sel);
         if (!m) { TTLog(@"[capture] send-hook MISS"); return; }
@@ -612,7 +612,7 @@ static void InstallPcmReplaceHook(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class cls = NSClassFromString(TTSCls(0));
-        if (!cls) { TTLog(@"[pcm-hook] AudioSender MISS"); return; }
+        if (!cls) { TTLog(@"[pcm-hook] cls MISS"); return; }
         SEL sel = NSSelectorFromString(TTCSel(6));
         Method m = class_getInstanceMethod(cls, sel);
         if (!m) { TTLog(@"[pcm-hook] OnOutputPcmBuffer: MISS"); return; }
@@ -671,14 +671,14 @@ static void InstallRecorderPartObserver(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class cls = NSClassFromString(TTSCls(0));
-        if (!cls) { TTLog(@"[part-obs] AudioSender MISS"); return; }
+        if (!cls) { TTLog(@"[part-obs] cls MISS"); return; }
         SEL sel = NSSelectorFromString(TTCSel(5));
         Method m = class_getInstanceMethod(cls, sel);
-        if (!m) { TTLog(@"[part-obs] OnRecorderPart MISS"); return; }
+        if (!m) { TTLog(@"[part-obs] part MISS"); return; }
 
         const char *types = method_getTypeEncoding(m);
         IMP oldImp = method_getImplementation(m);
-        TTLog(@"[part-obs] OnRecorderPart types=%s", types ? types : "?");
+        TTLog(@"[part-obs] types=%s", types ? types : "?");
         char ret = types ? types[0] : 'v';
         if (ret != 'v') { TTLog(@"[part-obs] 返回 %c 非 void，不 hook", ret); return; }
 
@@ -720,7 +720,7 @@ static void InstallRecorderEndCapture(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class cls = NSClassFromString(TTSCls(0));
-        if (!cls) { TTLog(@"[end-obs] AudioSender MISS"); return; }
+        if (!cls) { TTLog(@"[end-obs] cls MISS"); return; }
         NSArray *cands = @[ TTCSel(2),
                             TTCSel(3),
                             TTCSel(4) ];
@@ -759,7 +759,7 @@ static void InstallRecorderEndCapture(void) {
  * 之后要补哪一步不用猜（只有类型编码确认是单对象参/无参的方法才会被 v22 调用）。 */
 static void TTSDumpSendSelectors(void) {
     Class cls = NSClassFromString(TTSCls(0));
-    if (!cls) { TTLog(@"[sel-dump] AudioSender MISS"); return; }
+    if (!cls) { TTLog(@"[sel-dump] cls MISS"); return; }
     unsigned int n = 0;
     Method *ms = class_copyMethodList(cls, &n);
     NSMutableString *hit = [NSMutableString stringWithCapacity:2048];
@@ -775,7 +775,7 @@ static void TTSDumpSendSelectors(void) {
         [hit appendFormat:@"\n    %@ : %s", name, t ? t : "?"];
     }
     free(ms);
-    TTLog(@"[sel-dump] AudioSender 共 %u 方法，发送/录音/上传相关:%@", n, hit.length ? hit : @"(无)");
+    TTLog(@"[sel-dump] %u methods:%@", n, hit.length ? hit : @"(none)");
 }
 
 /* ==================== TTS API ==================== */
@@ -1417,7 +1417,7 @@ static UIImage *TTSLoadBallImage(void) {
     }
     if (!peer.length) { self.statusLabel.text = @"先按住说话一次（捕获会话）"; return; }
     if (!myWxid.length) { self.statusLabel.text = @"先按住说话一次（捕获身份）"; return; }
-    if (!audioSender) { self.statusLabel.text = @"拿不到 AudioSender"; return; }
+    if (!audioSender) { self.statusLabel.text = @"发送器未就绪"; return; }
 
     [self.input resignFirstResponder];
     self.send.enabled = NO;
@@ -1462,9 +1462,9 @@ static UIImage *TTSLoadBallImage(void) {
             @try {
                 BOOL (*fn)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))objc_msgSend;
                 recording = fn(audioSender, startSel, myWxid, peer, userInfo);
-                TTLog(@"[panel] StartRecordFrom ret=%d (wxid=%@)", recording, myWxid);
+                TTLog(@"[panel] start ret=%d", recording);
             } @catch (NSException *e) {
-                TTLog(@"[panel] StartRecordFrom 异常: %@", e);
+                TTLog(@"[panel] start EXC: %@", e);
             }
 
             if (recording) {
