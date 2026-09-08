@@ -460,6 +460,42 @@ static NSString *TTSPeerFromChatVC(id vc) {
                     free(ivs);
                     return sv;
                 }
+                /* v28f: KVC 安全下钻——值是对象（非 view/字符串/数据）→ 用 KVC 扫它的 ivar
+                 * （v28c 崩在 object_getIvar 裸读；这里全部走 valueForKey，不裸读） */
+                if (v && ![v isKindOfClass:[NSString class]] && ![v isKindOfClass:[NSNumber class]]
+                    && ![v isKindOfClass:[NSData class]] && ![v isKindOfClass:[UIView class]]
+                    && ![v isKindOfClass:[NSArray class]] && ![v isKindOfClass:[NSDictionary class]]
+                    && [NSStringFromClass([v class]) length] > 0
+                    && ![NSStringFromClass([v class]) hasPrefix:@"NS"]
+                    && ![NSStringFromClass([v class]) hasPrefix:@"UI"]
+                    && ![NSStringFromClass([v class]) hasPrefix:@"__"]) {
+                    @try {
+                        Class c2 = object_getClass(v);
+                        int lv2 = 0;
+                        while (c2 && c2 != [NSObject class] && lv2 < 6) {
+                            unsigned int n2 = 0;
+                            Ivar *ivs2 = class_copyIvarList(c2, &n2);
+                            for (unsigned int k = 0; ivs2 && k < n2 && k < 150; k++) {
+                                const char *nm2 = ivar_getName(ivs2[k]);
+                                if (!nm2) continue;
+                                NSString *key2 = [NSString stringWithUTF8String:nm2];
+                                if (!key2.length) continue;
+                                @try {
+                                    NSString *sv2 = TTSStringify([v valueForKey:key2]);
+                                    if (sv2.length && TTSLookLikeSessionId(sv2)) {
+                                        TTLog(@"[chat] 命中下钻 %@.%@ 值=%@", key, key2, sv2);
+                                        if (ivs2) free(ivs2);
+                                        free(ivs);
+                                        return sv2;
+                                    }
+                                } @catch (NSException *e2) { }
+                            }
+                            if (ivs2) free(ivs2);
+                            c2 = class_getSuperclass(c2);
+                            lv2++;
+                        }
+                    } @catch (NSException *e3) { }
+                }
             } @catch (NSException *e) { }
         }
         free(ivs);
