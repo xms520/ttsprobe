@@ -50,7 +50,7 @@ static void* (*I_thread_attach)(Il2CppDomain*);
 static void* g_uf = NULL;
 static lua_State* g_L = NULL;
 
-static volatile int f_godmode = 0, f_onehit = 0, f_speed = 0, f_dump = 0;   // f_speed: 0=关 1=2x 2=3x 3=½x
+static volatile int f_godmode = 0, f_onehit = 0, f_speed = 0, f_dump = 0;   // f_onehit: 0=关 1=温和x1000 2=暴力 10..1000=自定义倍率; f_speed: 0=关 1=2x 2=3x 3=½x
 static volatile int f_probe = 0;
 static int g_dump_done = 0, g_probe_done = 0;  // 一次性动作防重入
 static FILE* g_log = NULL;
@@ -192,7 +192,9 @@ static void read_flags(void) {
         if (strncmp(line, "god=1", 5) == 0) newgod = 1;
         else if (strncmp(line, "god=0", 5) == 0) newgod = 0;
         else if (strncmp(line, "onehit=1", 8) == 0) newhit = 1;
+        else if (strncmp(line, "onehit=2", 8) == 0) newhit = 2;
         else if (strncmp(line, "onehit=0", 8) == 0) newhit = 0;
+        else if (strncmp(line, "onehit=", 7) == 0) { int m = atoi(line + 7); if (m >= 10 && m <= 1000) newhit = m; }
         else if (strncmp(line, "speed=3", 7) == 0) newspd = 2;
         else if (strncmp(line, "speed=2", 7) == 0) newspd = 1;
         else if (strncmp(line, "speed=0.5", 9) == 0) newspd = 3;
@@ -418,6 +420,10 @@ static void install_beat(void) {
         "        elseif line:find('onehit=2', 1, true) then st.onehit = 2\n"
         "        elseif line:find('onehit=1', 1, true) then st.onehit = 1\n"
         "        elseif line:find('onehit=0', 1, true) then st.onehit = false\n"
+"        elseif line:find('onehit=', 1, true) then\n"
+"          local m = tonumber(line:match('onehit=(%%d+)'))\n"
+"          if m and m >= 10 then st.onehit = m end\n"
+
 "        elseif line:find('speed=3', 1, true) then st.speed = 3\n"
 "        elseif line:find('speed=2', 1, true) then st.speed = 2\n"
 "        elseif line:find('speed=0.5', 1, true) then st.speed = 0.5\n"
@@ -455,7 +461,8 @@ static void install_beat(void) {
         "            if s.god and not isZ then return end\n"
         "            if s.onehit and isZ then\n"
         "              if s.onehit == 1 then dmg = dmg * 1000\n"
-        "              else dmg = 9e15 end\n"
+        "              elseif s.onehit == 2 then dmg = 9e15\n"
+        "              else dmg = dmg * s.onehit end\n"
         "            end\n"
         "          end\n"
         "          return oldTD(self, dmg, ...)\n"
@@ -616,7 +623,7 @@ static void pm_write_flags(void) {
     if (f) {
         fprintf(f, "god=%d\nonehit=%d\nspeed=%s\n",
                 (int)f_godmode, (int)f_onehit,
-                f_speed==1?"2":f_speed==2?"3":f_speed==3?"0.5":"1");
+                f_speed==1?"2":f_speed==2?"3":f_speed==3?"0.5":"1");   // onehit: 0/1/2 三态 或 10..1000 拉条值
         fclose(f);
     }
 }
@@ -666,7 +673,10 @@ static NSString *pm_tsText(void) {
         default: return @"变速 · 关";
     }
 }
-static NSString *pm_hitText(void)    { return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关"); }
+static NSString *pm_hitText(void) {
+    if (f_onehit >= 10) return [NSString stringWithFormat:@"秒杀 · x%d", (int)f_onehit];
+    return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关");
+}
 static NSString *pm_engineText(void) {
     if (!g_uf)  return @"引擎 · 等待游戏加载";
     if (!g_L)   return @"引擎 · Lua 连接中";
@@ -800,7 +810,7 @@ static NSString *pm_engineText(void) {
     if (g_panel) { [self fg_closePanel]; return; }
     UIWindow *kw = fg_keyWindow();
     if (!kw) return;
-    CGFloat pw = 280, ph = 410;
+    CGFloat pw = 280, ph = 470;
     FloatGlassPanel *p = [[FloatGlassPanel alloc] initWithFrame:
         CGRectMake((kw.bounds.size.width  - pw) / 2.0,
                    (kw.bounds.size.height - ph) / 2.0, pw, ph)];
@@ -824,6 +834,8 @@ static NSString *pm_engineText(void) {
     UIButton *_tipBtn;
     UILabel  *_engLabel;
     NSTimer  *_refreshTimer;
+    UISlider *_multSlider;      // 攻击倍率拉条（x10..x1000）
+    UILabel  *_multLabel;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -872,8 +884,26 @@ static NSString *pm_engineText(void) {
         _hitBtn = [self pm_mkSwitch:CGRectMake(16, 110, 248, 46) title:pm_hitText() action:@selector(pm_hitTap:)];
         _tsBtn  = [self pm_mkSwitch:CGRectMake(16, 164, 248, 46) title:pm_tsText() action:@selector(pm_tsTap:)];
 
+        // 攻击倍率拉条（x10 ~ x1000，实时写 pm.flags；秒杀三态按钮独立）
+        _multLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 216, 248, 18)];
+        _multLabel.text = @"攻击倍率 · 关";
+        _multLabel.textAlignment = NSTextAlignmentCenter;
+        _multLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.9];
+        _multLabel.font = [UIFont boldSystemFontOfSize:13];
+        _multLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [self addSubview:_multLabel];
+
+        _multSlider = [[UISlider alloc] initWithFrame:CGRectMake(24, 238, 232, 30)];
+        _multSlider.minimumValue = 0.0f;
+        _multSlider.maximumValue = 1.0f;
+        _multSlider.value = 0.0f;
+        _multSlider.minimumTrackTintColor = [UIColor colorWithRed:0.98 green:0.45 blue:0.30 alpha:0.95];
+        _multSlider.tintColor = [UIColor colorWithWhite:1.0 alpha:0.6];
+        [_multSlider addTarget:self action:@selector(pm_multChanged:) forControlEvents:UIControlEventValueChanged];
+        [self addSubview:_multSlider];
+
         // 引擎状态行
-        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 218, 248, 34)];
+        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 278, 248, 34)];
         _engLabel.text = pm_engineText();
         _engLabel.textAlignment = NSTextAlignmentCenter;
         _engLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
@@ -1013,10 +1043,33 @@ static NSString *pm_engineText(void) {
 
 - (void)pm_hitTap:(id)sender {
     (void)sender;
-    f_onehit = (f_onehit + 1) % 3;   // 关 → 温和(×1000) → 暴力(9e15) → 关
+    f_onehit = (f_onehit + 1) % 3;   // 关 → 温和(×1000) → 暴力(9e15) → 关（自定义倍率时归 0 重开）
     pm_write_flags();
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
     LOG("ui: onehit=%d\n", (int)f_onehit);
+}
+
+// 攻击倍率拉条：0 位=关；其余对数映射 x10..x1000
+- (void)pm_multChanged:(UISlider *)s {
+    // 死区：前 8% 视为"关"
+    if (s.value < 0.08f) {
+        if (f_onehit > 2) {           // 只在拉条控制态时才关（不干扰三态按钮的 1/2）
+            f_onehit = 0;
+            pm_write_flags();
+        }
+        _multLabel.text = @"攻击倍率 · 关";
+        return;
+    }
+    // 对数刻度：pos 0.08..1.0 → x10..x1000
+    double pos = (s.value - 0.08) / 0.92;
+    double mult = pow(10.0, 1.0 + pos * 2.0);   // 10^1..10^3
+    int m = (int)mult;
+    if (m < 10) m = 10;
+    if (m > 1000) m = 1000;
+    f_onehit = m;
+    pm_write_flags();
+    _multLabel.text = [NSString stringWithFormat:@"攻击倍率 · x%d", m];
+    LOG("ui: mult=x%d\n", m);
 }
 
 - (void)pm_tsTap:(id)sender {
@@ -1039,6 +1092,9 @@ static NSString *pm_engineText(void) {
     [_godBtn setTitle:pm_godText() forState:UIControlStateNormal];
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
     [_tsBtn setTitle:pm_tsText() forState:UIControlStateNormal];
+    if (f_onehit >= 10) _multLabel.text = [NSString stringWithFormat:@"攻击倍率 · x%d", (int)f_onehit];
+    else if (f_onehit > 0) _multLabel.text = @"攻击倍率 · 关";   // 三态秒杀激活时拉条显示关
+    else _multLabel.text = @"攻击倍率 · 关";
 }
 
 - (void)fg_close {
@@ -1140,7 +1196,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v14 pid=%d\n", getpid());
+        LOG("PMGlass v15 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
