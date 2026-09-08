@@ -164,7 +164,15 @@ static void ts_try_init(void) {
 
 static void ts_apply(void) {
     // 主线程 tick 调用：把 UI 目标值写进 Time.timeScale
-    static float last = 0.0f;
+    // v12: last 初值 -1 表示"未同步过"；只在用户明确操作过变速（state 或 target 变化）时写入。
+    // v11 的 0.0 初值导致启动探测期就把 timeScale 写成 1.0（游戏启动时序被干扰 → 卡登录）
+    static float last = -1.0f;
+    static int user_touched = 0;
+    if (!user_touched) {
+        // 只有 pm_ts_state/target 偏离出厂值（state=0 且 target=1.0）才算用户碰过
+        if (pm_ts_state != 0 || pm_ts_target != 1.0f) user_touched = 1;
+        else return;   // 从未操作 → 不动游戏的 timeScale
+    }
     float want = pm_ts_state ? pm_ts_target : 1.0f;
     if (want == last) return;
     if (!g_set_timescale || !I_runtime_invoke) {
@@ -471,7 +479,8 @@ static void run_pending_on_main(void) {
         g_ping_pending = 0;
         if (!(job & (JOB_INSTALL | JOB_REINSTALL))) return;
     }
-    if (g_beat_ok && (job & JOB_INSTALL) && !(job & JOB_REINSTALL)) return;  // 已装好且非重装
+    if (g_beat_ok && !(job & JOB_REINSTALL)) return;  // v12: 已装好时任何非重装 job 到此为止（v11 纯 TS job 直落 install = 9 次重装）
+    if (!(job & (JOB_INSTALL | JOB_REINSTALL))) return;  // 纯 TS/PING job 不 install
     int r = lua_dostring("local x = 1 return x");
     LOG("channel verify rc=%d (0=OK) [main]\n", r);
     if (r != 0) return;
@@ -572,6 +581,22 @@ static void install_beat(void) {
     int rc = lua_dostring(rs);
     LOG("beat install rc=%d\n", rc);
     g_beat_ok = (rc == 0);
+    // v12: install 成功后顺带验证 reg（UpdateBeat 是否真挂上）——reg=FAIL 视为未装好，30s 后重试
+    if (g_beat_ok) {
+        const char* hc = getenv("HOME");
+        char sp[512];
+        snprintf(sp, sizeof(sp), "%s/Documents/pm.status", hc ? hc : "/var/mobile");
+        FILE* sf = fopen(sp, "r");
+        if (sf) {
+            char buf[64] = {0};
+            fread(buf, 1, sizeof(buf)-1, sf);
+            fclose(sf);
+            if (strncmp(buf, "reg=OK", 6) != 0) {
+                LOG("beat reg=FAIL (UpdateBeat absent) -> will retry\n");
+                g_beat_ok = 0;   // UpdateBeat 没挂上（登录页/早期）→ 下轮 ping 重试
+            }
+        }
+    }
 }
 
 static void* worker(void* a) {
@@ -1220,7 +1245,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v11 pid=%d\n", getpid());
+        LOG("PMGlass v12 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
