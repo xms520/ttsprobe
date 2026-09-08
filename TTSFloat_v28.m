@@ -429,35 +429,73 @@ static NSString *TTSStringify(id v) {
     if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v stringValue];
     return nil;
 }
+/* v28c: 值探测——不再猜 ivar 名，直接遍历全部 ivar，找值长得像会话 id 的字符串
+ *（wxid_xxx / xxx@chatroom / gh_ 开头，长度 6-60）。同时 dump ivar 名清单（一次）辅助定位。 */
+static BOOL TTSLookLikeSessionId(NSString *s) {
+    if (![s isKindOfClass:[NSString class]] || s.length < 6 || s.length > 60) return NO;
+    if ([s hasPrefix:@"wxid_"]) return YES;
+    if ([s hasSuffix:@"@chatroom"]) return YES;
+    if ([s hasPrefix:@"gh_"] && s.length > 10) return YES;
+    return NO;
+}
 static NSString *TTSPeerFromChatVC(id vc) {
     if (!vc) return nil;
-    /* 直接键（历史版本实测有效的都在这里） */
-    const char *direct[] = {
-        "m_nsChatUsername", "m_nsToUsr",
-        "chatContactUsername", "contactUserName",
-        "m_username", "username", "m_nsUserName"
-    };
-    for (NSUInteger i = 0; i < sizeof(direct)/sizeof(direct[0]); i++) {
-        NSString *s = TTSStringify(TTSFindIvar(vc, direct[i]));
-        if (s.length) return s;
-    }
-    /* 嵌套 contact 对象再取 */
-    const char *contacts[] = { "m_contact", "m_oContact", "m_chatContact", "contact", "_contact" };
-    for (NSUInteger i = 0; i < sizeof(contacts)/sizeof(contacts[0]); i++) {
-        id c = TTSFindIvar(vc, contacts[i]);
-        if (!c) continue;
-        const char *names[] = { "m_nsUsrName", "m_nsUserName", "nsUsrName", "m_nsChatUsername", "m_nsToUsr" };
-        for (NSUInteger j = 0; j < sizeof(names)/sizeof(names[0]); j++) {
-            NSString *s = TTSStringify(TTSFindIvar(c, names[j]));
-            if (s.length) return s;
+    static BOOL dumpedIvars = NO;
+    Class c = object_getClass(vc);
+    while (c) {
+        unsigned int n = 0;
+        Ivar *ivs = class_copyIvarList(c, &n);
+        for (unsigned int i = 0; i < n; i++) {
+            const char *nm = ivar_getName(ivs[i]);
+            if (!nm) continue;
+            @try {
+                id v = object_getIvar(vc, ivs[i]);
+                NSString *sv = TTSStringify(v);
+                if (sv.length && TTSLookLikeSessionId(sv)) {
+                    if (!dumpedIvars) {
+                        TTLog(@"[chat] 命中 ivar=%s 值=%@", nm, sv);
+                        dumpedIvars = YES;
+                    }
+                    return sv;
+                }
+                /* 嵌套一层：ivar 是对象（非字符串）→ 再扫它的 ivar 找会话 id */
+                if (v && ![v isKindOfClass:[NSString class]] && ![v isKindOfClass:[NSNumber class]]
+                    && ![v isKindOfClass:[NSData class]] && [v isKindOfClass:[NSObject class]]
+                    && ![(id)v isKindOfClass:[UIView class]]) {
+                    Class c2 = object_getClass(v);
+                    for (int depth = 0; depth < 1; depth++) {
+                        unsigned int n2 = 0;
+                        Ivar *ivs2 = class_copyIvarList(c2, &n2);
+                        for (unsigned int k = 0; k < n2; k++) {
+                            const char *nm2 = ivar_getName(ivs2[k]);
+                            if (!nm2) continue;
+                            @try {
+                                NSString *sv2 = TTSStringify(object_getIvar(v, ivs2[k]));
+                                if (sv2.length && TTSLookLikeSessionId(sv2)) {
+                                    if (!dumpedIvars) {
+                                        TTLog(@"[chat] 命中嵌套 %s.%s 值=%@", nm, nm2, sv2);
+                                        dumpedIvars = YES;
+                                    }
+                                    free(ivs2);
+                                    free(ivs);
+                                    return sv2;
+                                }
+                            } @catch (NSException *e) { }
+                        }
+                        if (ivs2) free(ivs2);
+                        c2 = class_getSuperclass(c2);
+                        if (!c2 || c2 == [NSObject class]) break;
+                    }
+                }
+            } @catch (NSException *e) { }
+            if (!dumpedIvars && i < 40) {
+                TTLog(@"[ivar] %s", nm);   /* 一次性 dump 前 40 个 ivar 名 */
+            }
         }
-    }
-    /* KVC 兜底（只读） */
-    for (NSString *key in @[@"m_nsChatUsername", @"m_nsToUsr", @"username", @"m_nsUserName"]) {
-        @try {
-            NSString *s = TTSStringify([vc valueForKey:key]);
-            if (s.length) return s;
-        } @catch (NSException *e) { }
+        if (ivs) free(ivs);
+        if (!dumpedIvars) dumpedIvars = YES;   /* 只 dump 一层 */
+        c = class_getSuperclass(c);
+        if (!c || c == [NSObject class]) break;
     }
     return nil;
 }
@@ -469,9 +507,9 @@ static NSString *TTSPeerFromChatVC(id vc);
 
 static BOOL TTSLooksLikeChatVC(NSString *cn) {
     if (!cn.length) return NO;
-    NSArray *keys = @[@"MsgContentViewController", @"BaseMsgContent", @"ChatRoomView",
-                      @"MessageViewController", @"ConversationView",
-                      @"Chat", @"Message"];
+    /* v28c: 实测确认的真实类名（TTSFloat_7.log [vc-tree]）*/
+    NSArray *keys = @[@"BaseMsgContentViewController", @"MsgContentViewController",
+                      @"ChatRoomView", @"MessageViewController", @"ConversationView"];
     for (NSString *k in keys) {
         if ([cn rangeOfString:k].location != NSNotFound) return YES;
     }
