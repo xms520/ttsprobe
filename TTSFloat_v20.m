@@ -410,19 +410,6 @@ static BOOL g_pcmFedDone = NO;           /* TTS 数据已全部喂进管线（St
  * 依次探测 ivar/KVC 键拿对端用户名。全部只读，不调微信方法，不崩。
  * 实测微信 8.0.x 聊天页: BaseMsgContentViewController（单聊）/
  * ChatRoomViewContoller（群聊）→ m_nsChatUsername / m_nsToUsr 等键。 */
-static id TTSFindIvar(id obj, const char *name) {
-    if (!obj) return nil;
-    Class c = object_getClass(obj);
-    while (c) {
-        Ivar iv = class_getInstanceVariable(c, name);
-        if (iv) {
-            @try { return object_getIvar(obj, iv); }
-            @catch (NSException *e) { return nil; }
-        }
-        c = class_getSuperclass(c);
-    }
-    return nil;
-}
 static NSString *TTSStringify(id v) {
     if (!v) return nil;
     if ([v isKindOfClass:[NSString class]]) return v;
@@ -438,67 +425,46 @@ static BOOL TTSLookLikeSessionId(NSString *s) {
     if ([s hasPrefix:@"gh_"] && s.length > 10) return YES;
     return NO;
 }
+/* v28d: 崩溃修复——v28c 的 object_getIvar 全量裸扫 + 对象下钻会踩到
+ * 微信 C++ 混合类的不安全字段（SIGSEGV，@try 拦不住信号）。
+ * 改为 KVC valueForKey: 只读探测（KVC 内部有完整防护，异常能被 @catch）：
+ *   ① class_copyIvarList 只拿【ivar 名清单】（不碰值）
+ *   ② 每个名字走 [vc valueForKey:name] 读值（安全 API）
+ *   ③ 只扫一层，不做对象下钻（崩溃面最大的部分）
+ *   ④ 限制 200 个 ivar 以内 */
 static NSString *TTSPeerFromChatVC(id vc) {
     if (!vc) return nil;
     static BOOL dumpedIvars = NO;
     Class c = object_getClass(vc);
-    while (c) {
-        unsigned int n = 0;
-        Ivar *ivs = class_copyIvarList(c, &n);
-        for (unsigned int i = 0; i < n; i++) {
-            const char *nm = ivar_getName(ivs[i]);
-            if (!nm) continue;
-            @try {
-                id v = object_getIvar(vc, ivs[i]);
-                NSString *sv = TTSStringify(v);
-                if (sv.length && TTSLookLikeSessionId(sv)) {
-                    if (!dumpedIvars) {
-                        TTLog(@"[chat] 命中 ivar=%s 值=%@", nm, sv);
-                        dumpedIvars = YES;
-                    }
-                    return sv;
+    if (!c) return nil;
+    unsigned int n = 0;
+    Ivar *ivs = class_copyIvarList(c, &n);
+    if (!ivs) return nil;
+    NSString *found = nil;
+    for (unsigned int i = 0; i < n && i < 200; i++) {
+        const char *nmC = ivar_getName(ivs[i]);
+        if (!nmC) continue;
+        NSString *key = [NSString stringWithUTF8String:nmC];
+        if (!key.length) continue;
+        if (!dumpedIvars && i < 40) TTLog(@"[ivar] %@", key);   /* 一次性 dump（诊断用） */
+        @try {
+            id v = [vc valueForKey:key];   /* KVC：安全读，异常走 @catch */
+            NSString *sv = TTSStringify(v);
+            if (sv.length && TTSLookLikeSessionId(sv)) {
+                if (!dumpedIvars) {
+                    TTLog(@"[chat] 命中 ivar=%@ 值=%@", key, sv);
+                    dumpedIvars = YES;
                 }
-                /* 嵌套一层：ivar 是对象（非字符串）→ 再扫它的 ivar 找会话 id */
-                if (v && ![v isKindOfClass:[NSString class]] && ![v isKindOfClass:[NSNumber class]]
-                    && ![v isKindOfClass:[NSData class]] && [v isKindOfClass:[NSObject class]]
-                    && ![(id)v isKindOfClass:[UIView class]]) {
-                    Class c2 = object_getClass(v);
-                    for (int depth = 0; depth < 1; depth++) {
-                        unsigned int n2 = 0;
-                        Ivar *ivs2 = class_copyIvarList(c2, &n2);
-                        for (unsigned int k = 0; k < n2; k++) {
-                            const char *nm2 = ivar_getName(ivs2[k]);
-                            if (!nm2) continue;
-                            @try {
-                                NSString *sv2 = TTSStringify(object_getIvar(v, ivs2[k]));
-                                if (sv2.length && TTSLookLikeSessionId(sv2)) {
-                                    if (!dumpedIvars) {
-                                        TTLog(@"[chat] 命中嵌套 %s.%s 值=%@", nm, nm2, sv2);
-                                        dumpedIvars = YES;
-                                    }
-                                    free(ivs2);
-                                    free(ivs);
-                                    return sv2;
-                                }
-                            } @catch (NSException *e) { }
-                        }
-                        if (ivs2) free(ivs2);
-                        c2 = class_getSuperclass(c2);
-                        if (!c2 || c2 == [NSObject class]) break;
-                    }
-                }
-            } @catch (NSException *e) { }
-            if (!dumpedIvars && i < 40) {
-                TTLog(@"[ivar] %s", nm);   /* 一次性 dump 前 40 个 ivar 名 */
+                found = sv;
+                break;
             }
-        }
-        if (ivs) free(ivs);
-        if (!dumpedIvars) dumpedIvars = YES;   /* 只 dump 一层 */
-        c = class_getSuperclass(c);
-        if (!c || c == [NSObject class]) break;
+        } @catch (NSException *e) { }
     }
-    return nil;
+    if (ivs) free(ivs);
+    if (!dumpedIvars) dumpedIvars = YES;
+    return found;
 }
+
 /* 遍历 VC 树，返回第一个"像聊天页"的 VC。
  * v28 首版类名匹配（MsgContentViewController/ChatRoomView/BaseMsgContent）实测没命中
  * → v28b 宽化：类名含 Message/Chat/Conversation 之一即算候选，再逐个试取用户名，
