@@ -525,6 +525,7 @@ static BOOL TTSLooksLikeChatVC(NSString *cn) {
 static id TTSFindChatVC(void) {
     static BOOL dumped = NO;
     id best = nil;
+    id listPageVC = nil;   /* v28g: 会话列表页（兜底） */
     /* v28e: NewMainFrameViewController（聊天容器）也作为候选（会话 id 可能挂在容器上） */
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
         UIViewController *root = w.rootViewController;
@@ -534,11 +535,14 @@ static id TTSFindChatVC(void) {
             UIViewController *cur = stack.lastObject;
             [stack removeLastObject];
             NSString *cn = NSStringFromClass([cur class]);
-            /* v28b: 宽匹配 → 拿到候选先用 ivar 探测验证，能读出会话 id 才算数 */
-            if (TTSLooksLikeChatVC(cn) || [cn isEqualToString:@"NewMainFrameViewController"]) {
+            /* v28g: 分级候选——真聊天页一级；NewMainFrame（会话列表页）只做最后兜底，
+             * 因为它里面的会话 id 是"上次阅读缓存"（m_readerReporter._usrName），不是当前打开的对话 */
+            if (TTSLooksLikeChatVC(cn)) {
                 NSString *peer = TTSPeerFromChatVC(cur);
                 if (peer.length) { dumped = YES; return cur; }
                 if (!best) best = cur;
+            } else if ([cn isEqualToString:@"NewMainFrameViewController"]) {
+                if (!listPageVC) listPageVC = cur;   /* 会话列表页，最后再试 */
             }
             if (!dumped) {
                 /* 诊断：把整棵 VC 树类名打出来（只打一次；行首 [vc-tree]） */
@@ -549,7 +553,16 @@ static id TTSFindChatVC(void) {
         }
         if (!dumped) dumped = YES;   /* 第一个窗口树 dump 完就不再打 */
     }
-    return best;
+    /* v28g: 有真聊天页候选就用；没有才回落会话列表页（值可能是上次阅读的会话） */
+    if (best) return best;
+    if (listPageVC) {
+        NSString *peer = TTSPeerFromChatVC(listPageVC);
+        if (peer.length) {
+            TTLog(@"[chat] 聊天页未找到——回落会话列表页缓存（可能不是当前对话）: %@", peer);
+            return listPageVC;
+        }
+    }
+    return nil;
 }
 static NSString *TTSCurrentChatPeer(void) {
     static NSString *lastHit = nil;
@@ -562,6 +575,7 @@ static NSString *TTSCurrentChatPeer(void) {
     }
     return lastHit;   /* 探测失败回落上次成功的值 */
 }
+/* v28g: 发送时用的"当前对象"——聊天页优先；面板打开也实时调它 */
 /* ==================== v27: 会话持久化（免捕捉直接发送） ====================
  * 捕捉一次后：from/myWxid、toUser、userInfo 快照落 NSUserDefaults。
  * 下次启动微信不捕捉直接发（同一会话）；换会话未捕捉则回落上次参数。 */
