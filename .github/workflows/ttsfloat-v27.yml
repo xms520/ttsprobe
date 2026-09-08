@@ -1,0 +1,63 @@
+name: build-ttsfloat-v27
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - "TTSFloat_v27.m"
+      - "TTSFloat_v27.yml"
+      - ".github/workflows/ttsfloat-v27.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid || true
+
+      - name: Generate embedded resources (avatar + tip QR)
+        run: python3 build_res.py
+
+      - name: Build TTSFloat_v27 dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 \
+            -Oz -fvisibility=hidden \
+            -fno-stack-protector \
+            -Xlinker -S -Xlinker -x -Xlinker -dead_strip \
+            -dynamiclib \
+            -framework Foundation -framework UIKit -framework AVFoundation -framework CoreGraphics \
+            -o TTSFloat_v27.dylib \
+            TTSFloat_v27.m fishhook.c
+
+      - name: Fake-sign with ldid
+        run: ldid -S TTSFloat_v27.dylib || true
+
+      - name: Show result
+        run: |
+          ls -la TTSFloat_v27.dylib
+          file TTSFloat_v27.dylib
+
+      - name: Compute md5
+        run: |
+          md5 TTSFloat_v27.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TTSFloat-v27-dylib
+          path: TTSFloat_v27.dylib
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TTSFloat_v27.dylib
+          name: TTSFloat_v27 Release
