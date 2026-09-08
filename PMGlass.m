@@ -38,6 +38,7 @@ static const char* (*L_tolstring)(lua_State*, int, size_t*);
 typedef void Il2CppDomain; typedef void Il2CppImage; typedef void Il2CppClass;
 typedef void Il2CppAssembly; typedef void FieldInfo;
 static void* (*I_runtime_invoke)(void* method, void* obj, void** params, void** exc);
+static void* (*I_value_box)(void* klass, void* value);
 static void* (*I_get_method)(void* klass, const char* name, int args);
 static void* (*I_class_get_methods)(void* klass, void** iter);
 static const char* (*I_method_get_name)(void* method);
@@ -111,6 +112,7 @@ static void resolve_syms(void) {
     I_get_method      = (void*)dlsym(g_uf, "il2cpp_class_get_method_from_name");
     I_class_get_methods = (void*)dlsym(g_uf, "il2cpp_class_get_methods");
     I_method_get_name = (void*)dlsym(g_uf, "il2cpp_method_get_name");
+    I_value_box = (void*)dlsym(g_uf, "il2cpp_value_box");
     }
 }
 
@@ -122,6 +124,7 @@ static void* g_set_timescale = NULL;
 static volatile float pm_ts_target = 1.0f;   // UI 写；主线程 tick 应用
 static volatile int   pm_ts_state = 0;       // 0=off 1=on
 static int ts_init_once = 0;
+static void* g_single_class = NULL;   // System.Single（float 装箱必需）
 
 static void ts_try_init(void) {
     // 全主线程调用；失败只 log 一次（图像/类未就绪时下个 tick 重试由调用方控制）
@@ -146,6 +149,13 @@ static void ts_try_init(void) {
         } else {
             LOG("ts: CoreModule found but Time class miss\n");
         }
+        // v11: System.Single（mscorlib）——il2cpp_runtime_invoke 的 params 必须是
+        // 【boxed Il2CppObject* 数组】，传裸 float 会被当指针解引用 = SIGSEGV
+        // （crash 实锤：x8=0x3f800000=float 1.0）
+        if (!g_single_class) {
+            Il2CppClass* sc = I_class_from_name((const Il2CppImage*)img, "System", "Single");
+            if (sc) g_single_class = sc;
+        }
         return;
     }
     LOG("ts: CoreModule image not found (%zu asm)\n", n);
@@ -164,9 +174,31 @@ static void ts_apply(void) {
             return;
         }
     }
+    // System.Single 类没拿到时再试（CoreModule 图像里找过了，这里兜底遍历 mscorlib）
+    if (!g_single_class && I_domain_get && I_domain_assemblies && I_class_from_name) {
+        void* dom = I_domain_get();
+        size_t n = 0;
+        Il2CppAssembly** asms = I_domain_assemblies(dom, &n);
+        for (size_t i = 0; i < n && !g_single_class; i++) {
+            const Il2CppImage* img = I_asm_get_image(asms[i]);
+            if (!img) continue;
+            const char* nm2 = I_image_get_name(img);
+            if (!nm2 || strstr(nm2, "mscorlib") != nm2) continue;
+            Il2CppClass* sc = I_class_from_name((const Il2CppImage*)img, "System", "Single");
+            if (sc) g_single_class = sc;
+        }
+    }
+    if (!g_single_class || !I_value_box) {
+        LOG("ts: no Single class/box fn (sc=%p box=%p) — skip\n", g_single_class, (void*)I_value_box);
+        return;
+    }
+    // v11: box float → Il2CppObject*，params 数组指向它（正确调用约定）
     float v = want;
+    void* boxed = I_value_box(g_single_class, &v);
+    if (!boxed) { LOG("ts: box failed\n"); return; }
+    void* params[1] = { boxed };
     void* exc = NULL;
-    I_runtime_invoke(g_set_timescale, NULL, (void**)&v, &exc);
+    I_runtime_invoke(g_set_timescale, NULL, params, &exc);
     if (exc) { LOG("ts: invoke exception=%p\n", exc); return; }
     last = want;
     LOG("ts: timeScale -> %.2f\n", (double)want);
@@ -1188,7 +1220,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v10 pid=%d\n", getpid());
+        LOG("PMGlass v11 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
