@@ -106,8 +106,9 @@ static NSString *TTSXorHex(const char *hex, int key) {
     NSUInteger n = strlen(hex) / 2;
     NSMutableString *o = [NSMutableString stringWithCapacity:n];
     for (NSUInteger i = 0; i < n; i++) {
-        int hi = hex[i*2] - '0'; if (hi > 9) hi -= 'a' - '0';
-        int lo = hex[i*2+1] - '0'; if (lo > 9) lo -= 'a' - '0';
+        /* hex→int（标准写法；此前 'a'-'0' 的偏移写错导致解码全乱 → 类名 MISS）*/
+        int hi = hex[i*2];   if (hi >= 'a') hi -= 'a' - 10; else hi -= '0';
+        int lo = hex[i*2+1]; if (lo >= 'a') lo -= 'a' - 10; else lo -= '0';
         int v = (hi << 4) | lo;
         v ^= key;
         if (v == 0) break;   /* 密文不含 0x00；遇到即截断 */
