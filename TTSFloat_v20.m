@@ -145,7 +145,20 @@ static void TTSAddVoice(NSMutableArray *out, NSMutableSet *seen, NSString *name)
     [seen addObject:key];
     [out addObject:n];
 }
-static NSArray *TTSParseVoiceList(NSString *text) {
+static NSArray *TTSParseVoiceList(NSString *raw0) {
+    /* 万一是 HTML：去标签 + 实体还原（<br> 转换行），再按行解析 */
+    NSString *text = raw0;
+    if ([text rangeOfString:@"<"].location != NSNotFound) {
+        text = [text stringByReplacingOccurrencesOfString:@"<br>" withString:@"\n" options:NSCaseInsensitiveSearch range:NSMakeRange(0, text.length)];
+        text = [text stringByReplacingOccurrencesOfString:@"<br/>" withString:@"\n" options:NSCaseInsensitiveSearch range:NSMakeRange(0, text.length)];
+        text = [text stringByReplacingOccurrencesOfString:@"<br />" withString:@"\n" options:NSCaseInsensitiveSearch range:NSMakeRange(0, text.length)];
+        text = [text stringByReplacingOccurrencesOfString:@"<p>" withString:@"\n" options:NSCaseInsensitiveSearch range:NSMakeRange(0, text.length)];
+        text = [text stringByReplacingOccurrencesOfString:@"</p>" withString:@"\n" options:NSCaseInsensitiveSearch range:NSMakeRange(0, text.length)];
+        text = [text stringByReplacingOccurrencesOfString:@"&nbsp;" withString:@" "];
+        text = [text stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""];
+        text = [text stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
+        text = [text stringByReplacingOccurrencesOfString:@"<[^>]+>" withString:@"\n" options:NSRegularExpressionSearch range:NSMakeRange(0, text.length)];
+    }
     NSMutableArray *out = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     NSArray<NSString *> *seps = @[ @".", @"、", @")", @"）", @":", @"：" ];
