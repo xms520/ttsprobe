@@ -51,9 +51,9 @@ static NSString *TTSEndpoint(void) {
     return e;
 }
 #define K_DEFAULT_VOICE @"TVB女"
-#define K_KEY_A @"86306ba1cf8d50b2866c8"
-#define K_KEY_B @"369a14b384fe1ff96900c"
-#define K_KEY_C @"a822d98bd35274e87b0635"
+#define K_KEY_A_HEX @"040a0f0c0a5e5d0d5f5a0458090c5e0e040a0a5f04"
+#define K_KEY_B_HEX @"0f0a055d0d085e0f04085a590d5a5a050a050c0c5f"
+#define K_KEY_C_HEX @"5d040e0e5805045e580f090e0b0859040b5e0c0a0f09"
 
 static NSInteger g_targetSampleRate = 16000;
 
@@ -779,8 +779,15 @@ static void TTSDumpSendSelectors(void) {
 }
 
 /* ==================== TTS API ==================== */
-static NSString *TiaxKey(void) {   /* v26: key 三段拼装，防 strings 直出 */
-    return [K_KEY_A stringByAppendingString:[K_KEY_B stringByAppendingString:K_KEY_C]];
+static NSString *TiaxKey(void) {   /* v26: key 三段 hex 密文运行时解码，strings 直搜无果 */
+    static NSString *k = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        k = [TTSXorHex(K_KEY_A_HEX.UTF8String, 0x3C) stringByAppendingString:
+            [TTSXorHex(K_KEY_B_HEX.UTF8String, 0x3C) stringByAppendingString:
+              TTSXorHex(K_KEY_C_HEX.UTF8String, 0x3C)]];
+    });
+    return k;
 }
 
 static NSString *TTSEncode(NSString *s) {
