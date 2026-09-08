@@ -37,11 +37,6 @@ static const char* (*L_tolstring)(lua_State*, int, size_t*);
 
 typedef void Il2CppDomain; typedef void Il2CppImage; typedef void Il2CppClass;
 typedef void Il2CppAssembly; typedef void FieldInfo;
-static void* (*I_runtime_invoke)(void* method, void* obj, void** params, void** exc);
-static void* (*I_value_box)(void* klass, void* value);
-static void* (*I_get_method)(void* klass, const char* name, int args);
-static void* (*I_class_get_methods)(void* klass, void** iter);
-static const char* (*I_method_get_name)(void* method);
 static void* (*I_domain_get_orig)(void);
 static Il2CppDomain* (*I_domain_get)(void);
 static Il2CppAssembly** (*I_domain_assemblies)(const Il2CppDomain*, size_t*);
@@ -108,100 +103,7 @@ static void resolve_syms(void) {
     I_class_field     = (void*)dlsym(g_uf, "il2cpp_class_get_field_from_name");
     I_field_static_get= (void*)dlsym(g_uf, "il2cpp_field_static_get_value");
     I_thread_attach   = (void*)dlsym(g_uf, "il2cpp_thread_attach");
-    I_runtime_invoke  = (void*)dlsym(g_uf, "il2cpp_runtime_invoke");
-    I_get_method      = (void*)dlsym(g_uf, "il2cpp_class_get_method_from_name");
-    I_class_get_methods = (void*)dlsym(g_uf, "il2cpp_class_get_methods");
-    I_method_get_name = (void*)dlsym(g_uf, "il2cpp_method_get_name");
-    I_value_box = (void*)dlsym(g_uf, "il2cpp_value_box");
     }
-}
-
-// ── 全局变速：UnityEngine.Time.timeScale（引擎级，影响 Update/动画/协程/物理）──
-// 通路：il2cpp_domain_get → 找 UnityEngine.CoreModule 图像 → class_from_name("UnityEngine","Time")
-//      → class_get_method_from_name("Time","set_timeScale",1) → runtime_invoke
-static void* g_time_class = NULL;
-static void* g_set_timescale = NULL;
-static volatile float pm_ts_target = 1.0f;   // UI 写；主线程 tick 应用
-static volatile int   pm_ts_state = 0;       // 0=off 1=on
-static int ts_init_once = 0;
-static void* g_single_class = NULL;   // System.Single（float 装箱必需）
-
-static void ts_try_init(void) {
-    // 全主线程调用；成功后不再重复（每次全量遍历程序集在主线程跑 = GC 竞态卡死风险）
-    if (ts_init_once) return;
-    if (g_time_class && g_set_timescale && g_single_class) { ts_init_once = 1; return; }
-    void* dom = I_domain_get ? I_domain_get() : NULL;
-    if (!dom) return;
-    size_t n = 0;
-    Il2CppAssembly** asms = I_domain_assemblies ? I_domain_assemblies(dom, &n) : NULL;
-    if (!asms) return;
-    for (size_t i = 0; i < n; i++) {
-        const Il2CppImage* img = I_asm_get_image(asms[i]);
-        if (!img) continue;
-        const char* nm = I_image_get_name(img);
-        if (!nm) continue;
-        if (strstr(nm, "UnityEngine.CoreModule") != nm) continue;
-        Il2CppClass* k = I_class_from_name((const Il2CppImage*)img, "UnityEngine", "Time");
-        if (k) {
-            g_time_class = k;
-            void* m = I_get_method ? I_get_method(k, "set_timeScale", 1) : NULL;
-            if (m) g_set_timescale = m;
-            LOG("ts: Time class=%p set_timeScale=%p (CoreModule image=%p)\n", k, m, (void*)img);
-        } else {
-            LOG("ts: CoreModule found but Time class miss\n");
-        }
-        // v13: Single 必须从 mscorlib 找（CoreModule 里没有 System.Single！v12 找不到 →
-        // 每次 ts_apply 兜底遍历 885 程序集 → GC 竞态 → 主线程卡死）
-        for (size_t j = 0; j < n; j++) {
-            const Il2CppImage* im2 = I_asm_get_image(asms[j]);
-            if (!im2) continue;
-            const char* nm2 = I_image_get_name(im2);
-            if (!nm2 || strstr(nm2, "mscorlib") != nm2) continue;
-            Il2CppClass* sc = I_class_from_name((const Il2CppImage*)im2, "System", "Single");
-            if (sc) { g_single_class = sc; LOG("ts: System.Single=%p (mscorlib)\n", sc); }
-            break;
-        }
-        ts_init_once = 1;   // v13: 一次探测（成功或失败）后不再重跑——主线程反复遍历程序集会碰 GC 卡死
-        return;
-    }
-    LOG("ts: CoreModule image not found (%zu asm)\n", n);
-    ts_init_once = 1;
-}
-
-static void ts_apply(void) {
-    // 主线程 tick 调用：把 UI 目标值写进 Time.timeScale
-    // v12: last 初值 -1 表示"未同步过"；只在用户明确操作过变速（state 或 target 变化）时写入。
-    // v11 的 0.0 初值导致启动探测期就把 timeScale 写成 1.0（游戏启动时序被干扰 → 卡登录）
-    static float last = -1.0f;
-    static int user_touched = 0;
-    if (!user_touched) {
-        // 只有 pm_ts_state/target 偏离出厂值（state=0 且 target=1.0）才算用户碰过
-        if (pm_ts_state != 0 || pm_ts_target != 1.0f) user_touched = 1;
-        else return;   // 从未操作 → 不动游戏的 timeScale
-    }
-    float want = pm_ts_state ? pm_ts_target : 1.0f;
-    if (want == last) return;
-    if (!g_set_timescale || !I_runtime_invoke) {
-        ts_try_init();
-        if (!g_set_timescale || !I_runtime_invoke) {
-            LOG("ts: not ready (cls=%p m=%p inv=%p)\n", g_time_class, g_set_timescale, (void*)I_runtime_invoke);
-            return;
-        }
-    }
-    if (!g_single_class || !I_value_box) {
-        LOG("ts: no Single class/box fn (sc=%p box=%p) — ts disabled\n", g_single_class, (void*)I_value_box);
-        return;   // v13: 不再兜底遍历（主线程反复扫程序集 = GC 竞态卡死）；init 一次性搞定
-    }
-    // v11: box float → Il2CppObject*，params 数组指向它（正确调用约定）
-    float v = want;
-    void* boxed = I_value_box(g_single_class, &v);
-    if (!boxed) { LOG("ts: box failed\n"); return; }
-    void* params[1] = { boxed };
-    void* exc = NULL;
-    I_runtime_invoke(g_set_timescale, NULL, params, &exc);
-    if (exc) { LOG("ts: invoke exception=%p\n", exc); return; }
-    last = want;
-    LOG("ts: timeScale -> %.2f\n", (double)want);
 }
 
 static int lua_dostring(const char* code) {
@@ -448,16 +350,11 @@ static volatile char g_pending_job = 0;
 #define JOB_INSTALL   1
 #define JOB_REINSTALL 2
 #define JOB_PING      4
-#define JOB_TS        8
 static volatile int g_ping_pending = 0;
 static void install_beat(void);
 static void run_pending_on_main(void) {
     if (g_pending_job == 0) return;
     int job = g_pending_job; g_pending_job = 0;
-    if (job & JOB_TS) {     // 变速：timeScale 应用（主线程）
-        ts_try_init();
-        ts_apply();
-    }
     if (!g_L) return;
     if (job & JOB_PING) {
         // 30s ping —— 在游戏主线程执行（与游戏自身 Lua 串行，绝不竞态）
@@ -500,7 +397,7 @@ static void install_beat(void) {
     char rs[4096];
     snprintf(rs, sizeof(rs),
         // 主回调：状态轮询 + hook 安装，全部游戏主线程执行
-        "rawset(_G, '__PM_S__', {god=false, onehit=false})\n"
+        "rawset(_G, '__PM_S__', {god=false, onehit=false, speed=1})\n"
         "local home = '%s'\n"
         "local st = rawget(_G, '__PM_S__')\n"
         "local frame = 0\n"
@@ -516,6 +413,10 @@ static void install_beat(void) {
         "        elseif line:find('onehit=2', 1, true) then st.onehit = 2\n"
         "        elseif line:find('onehit=1', 1, true) then st.onehit = 1\n"
         "        elseif line:find('onehit=0', 1, true) then st.onehit = false\n"
+"        elseif line:find('speed=3', 1, true) then st.speed = 3\n"
+"        elseif line:find('speed=2', 1, true) then st.speed = 2\n"
+"        elseif line:find('speed=0.5', 1, true) then st.speed = 0.5\n"
+"        elseif line:find('speed=1', 1, true) then st.speed = 1\n"
                 "        end\n"
         "      end\n"
         "      ff:close()\n"
@@ -526,6 +427,17 @@ static void install_beat(void) {
         "    local ed = rawget(_G, 'ed')\n"
         "    local UC = ed and ed.UnitComponent\n"
         "    if UC then\n"
+        "      local BE = ed.BattleEngine\n"
+        "      if BE and not rawget(_G, '__PM_SP__') and BE.GetTimeScale then\n"
+        "        rawset(_G, '__PM_SP__', true)\n"
+        "        local oldGTS = BE.GetTimeScale\n"
+        "        BE.GetTimeScale = function(self)\n"
+        "          local ts = oldGTS(self)\n"
+        "          local s2 = rawget(_G, '__PM_S__')\n"
+        "          if s2 and s2.speed and s2.speed > 1 then return ts * s2.speed end\n"
+        "          return ts\n"
+        "        end\n"
+        "      end\n"
         "      rawset(_G, '__PM_H__', true)\n"
                 "      local oldTD = UC.TakeDamage\n"
         "      if oldTD then\n"
@@ -607,17 +519,6 @@ static void* worker(void* a) {
         if (g_uf) resolve_syms();
         if (g_uf && !g_L && i > 4) try_get_lua();
 
-        // v10: 变速点击在观测期也要即时响应（v9 点击落在 Phase 1 = 等 30s 才投递）
-        if (g_uf) {
-            static float ts_seen = -1.0f;
-            static int ts_st_seen = -1;
-            if (pm_ts_target != ts_seen || pm_ts_state != ts_st_seen) {
-                ts_seen = pm_ts_target; ts_st_seen = pm_ts_state;
-                g_pending_job |= JOB_TS;
-                post_to_main(NULL);
-            }
-        }
-
         if (g_L && i > 60) break;  // Lua 就绪后停止观测（无 UI 版）
 
         if (i % 10 == 0) {
@@ -690,18 +591,6 @@ static void* worker(void* a) {
                 if (L_getstate) { g_L = L_getstate(); if (g_L) { LOG("L re-acquired %p\n",(void*)g_L); g_pending_job |= JOB_REINSTALL; post_to_main(NULL); } }
             }
         }
-        // 变速 watch：UI 写 pm_ts_target/pm_ts_state（volatile）后置 job=4；
-        // worker 每 tick 检查脏标记投递主线程应用（约 1.5s 内生效）
-        {
-            static float ts_last_seen = -1.0f;
-            static int ts_state_seen = -1;
-            if (pm_ts_target != ts_last_seen || pm_ts_state != ts_state_seen) {
-                ts_last_seen = pm_ts_target;
-                ts_state_seen = pm_ts_state;
-                g_pending_job |= JOB_TS;
-                post_to_main(NULL);
-            }
-        }
         if ((tick++ % 3) == 0) read_flags();
         usleep(500000);
     }
@@ -764,10 +653,12 @@ static BOOL fg_shouldSkip(NSString *bid) {
 
 static NSString *pm_godText(void)    { return f_godmode ? @"无敌 · 开" : @"无敌 · 关"; }
 static NSString *pm_tsText(void) {
-    if (!pm_ts_state) return @"变速 · 关";
-    if (pm_ts_target >= 3.0f) return @"变速 · 3x";
-    if (pm_ts_target >= 2.0f) return @"变速 · 2x";
-    return @"变速 · ½x";
+    switch ((int)f_speed) {
+        case 1: return @"变速 · 2x";
+        case 2: return @"变速 · 3x";
+        case 3: return @"变速 · ½x";
+        default: return @"变速 · 关";
+    }
 }
 static NSString *pm_hitText(void)    { return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关"); }
 static NSString *pm_engineText(void) {
@@ -1124,13 +1015,11 @@ static NSString *pm_engineText(void) {
 
 - (void)pm_tsTap:(id)sender {
     (void)sender;
-    // 关 → 2x → 3x → ½x → 关
-    if (!pm_ts_state)      { pm_ts_state = 1; pm_ts_target = 2.0f; }
-    else if (pm_ts_target >= 3.0f) { pm_ts_state = 1; pm_ts_target = 0.5f; }
-    else if (pm_ts_target >= 2.0f) { pm_ts_target = 3.0f; }
-    else                   { pm_ts_state = 0; pm_ts_target = 1.0f; }
+    // 关 → 2x → 3x → ½x → 关（f_speed 0..3；写 pm.flags 由引擎 Lua 侧 BattleEngine hook 应用）
+    f_speed = (f_speed + 1) % 4;
+    pm_write_flags();
     [_tsBtn setTitle:pm_tsText() forState:UIControlStateNormal];
-    LOG("ui: ts state=%d target=%.2f\n", (int)pm_ts_state, (double)pm_ts_target);
+    LOG("ui: speed=%d\n", (int)f_speed);
 }
 
 - (void)pm_tipTap:(id)sender {
@@ -1245,7 +1134,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v13 pid=%d\n", getpid());
+        LOG("PMGlass v14 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
