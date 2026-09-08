@@ -40,14 +40,14 @@
 /* ==================== 配置 ==================== */
 /* 端点拆三段，避免 strings 直出 */
 #define K_EP_A @"https://"
-#define K_EP_B_OBF "---t.3;\"t*-u\u001b\u000a\u0013u"
-static NSString *TTSXorDecode(NSString *s, unichar k);
-#define K_EP_C_OBF "#/#34ht*2*"
+#define K_EP_B_OBF @"2d2d2d742e333b22742a2d751b0a1375"
+static NSString *TTSXorHex(const char *hex, int key);
+#define K_EP_C_OBF @"232f23333468742a322a"
 static NSString *TTSEndpoint(void) {
     static NSString *e = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ e = [K_EP_A stringByAppendingString:
-        [TTSXorDecode(K_EP_B_OBF, 0x5A) stringByAppendingString:TTSXorDecode(K_EP_C_OBF, 0x5A)]]; });
+        [TTSXorHex(K_EP_B_OBF.UTF8String, 0x5A) stringByAppendingString:TTSXorHex(K_EP_C_OBF.UTF8String, 0x5A)]]; });
     return e;
 }
 #define K_DEFAULT_VOICE @"TVB女"
@@ -100,9 +100,19 @@ static void TTLog(NSString *fmt, ...) {
 /* ==================== v26: 关键字符串运行时解码（反 strings 提取） ====================
  * strings/IDA 里搜不到 hook 类名 / selector / 域名——全部 XOR 解码或分段拼接。
  * 逆向者必须反汇编到 TTSXorDecode 才能还原目标。 */
-static NSString *TTSXorDecode(NSString *s, unichar k) {
-    NSMutableString *o = [NSMutableString stringWithCapacity:s.length];
-    for (NSUInteger i = 0; i < s.length; i++) [o appendFormat:@"%C", (unichar)([s characterAtIndex:i] ^ k)];
+/* v26: hex 密文 → XOR 解码。密文只含 [0-9a-f]，strings 里就是一段普通 hex，无语义 */
+static NSString *TTSXorHex(const char *hex, int key) {
+    if (!hex) return nil;
+    NSUInteger n = strlen(hex) / 2;
+    NSMutableString *o = [NSMutableString stringWithCapacity:n];
+    for (NSUInteger i = 0; i < n; i++) {
+        int hi = hex[i*2] - '0'; if (hi > 9) hi -= 'a' - '0';
+        int lo = hex[i*2+1] - '0'; if (lo > 9) lo -= 'a' - '0';
+        int v = (hi << 4) | lo;
+        v ^= key;
+        if (v == 0) break;   /* 密文不含 0x00；遇到即截断 */
+        [o appendFormat:@"%C", (unichar)v];
+    }
     return o;
 }
 
@@ -111,28 +121,29 @@ static NSArray *TTSObfTable(void) {
     static NSArray *t = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ t = @[
-        @"\u001b/>35\u0009?4>?("  /* cls: AudioSender */,
-        @"\u0017\u0010\u0009361\u00195>?9"  /* cls: MJSilkCodec */,
-        @"LNYL]NYoYRX\u0006"  /* sel: prepareSend: */,
-        @"oHSLnY_SNX"  /* sel: StopRecord */,
-        @"sRnY_SNXYNyRXnY_SNXUR[\u0006"  /* sel: OnRecorderEndRecording: */,
-        @"sRnY_SNXYNyRXnY_SNXUR[\u0006iOYNx]H]\u0006"  /* sel: OnRecorderEndRecording:UserData: */,
-        @"sRnY_SNXYNyRXnY_SNXUR[\u0006yNNSN\u0006"  /* sel: OnRecorderEndRecording:Error: */,
-        @"sRnY_SNXYNl]NH\u0006sZZOYH\u0006pYR\u0006yRXzP][\u0006zSN_YxYPYHY\u0006xIN]HUSR\u0006"  /* sel: OnRecorderPart:Offset:Len:EndFlag:ForceDelete:Duration: */,
-        @"sRsIHLIHl_Q~IZZYN\u0006iOYNx]H]\u0006"  /* sel: OnOutputPcmBuffer:UserData: */,
-        @"}IXUSmIYIYrYKuRLIH"  /* sel: AudioQueueNewInput */,
-        @"oH]NHnY_SNXzNSQ\u0006hSiOYN\u0006iOYNuRZS\u0006"  /* sel: StartRecordFrom:ToUser:UserInfo: */,
-        @"oYRXsNUjSU_YqO[kUHTiOYNx]H]\u0006"  /* sel: SendOriVoiceMsgWithUserData: */
+        @"1b2f3e3335093f343e3f28"  /* cls */,
+        @"17100933363119353e3f39"  /* cls */,
+        @"4c4e594c5d4e596f59525806"  /* sel */,
+        @"6f48534c6e595f534e58"  /* sel */,
+        @"73526e595f534e58594e7952586e595f534e5855525b06"  /* sel */,
+        @"73526e595f534e58594e7952586e595f534e5855525b06694f594e785d485d06"  /* sel */,
+        @"73526e595f534e58594e7952586e595f534e5855525b06794e4e534e06"  /* sel */,
+        @"73526e595f534e58594e6c5d4e4806735a5a4f594806705952067952587a505d5b067a534e5f597859505948590678494e5d4855535206"  /* sel */,
+        @"73527349484c49486c5f517e495a5a594e06694f594e785d485d06"  /* sel */,
+        @"7d495855536d4959495972594b75524c4948"  /* sel */,
+        @"6f485d4e486e595f534e587a4e5351066853694f594e06694f594e75525a5306"  /* sel */,
+        @"6f595258734e556a53555f59714f5b6b554854694f594e785d485d06"  /* sel */
         ]; });
     return t;
 }
-static NSString *TTSCls(int i) { return TTSXorDecode(TTSObfTable()[i], (unichar)0x5A); }
-static NSString *TTCSel(int i) { return TTSXorDecode(TTSObfTable()[2 + i], (unichar)0x3C); }
+static NSString *TTSCls(int i) { return TTSXorHex([TTSObfTable()[i] UTF8String], 0x5A); }
+static NSString *TTCSel(int i) { return TTSXorHex([TTSObfTable()[2 + i] UTF8String], 0x3C); }
 
 /* ==================== 崩溃定位（v23 新增） ====================
  * 闪退后日志里会多出 [CRASH] 行；dylib 基址一并打印，
  * 崩溃帧地址 - 基址 = Hopper 里 MicroMessenger.dylib 的偏移（结合 .ips 报告定位）。 */
 #include <execinfo.h>
+#include <string.h>
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -269,8 +280,8 @@ static NSString *TTSDecodeBody(NSData *data) {
 static NSString *TTSVoiceEndpoint(void) {
     static NSString *e = nil;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ e = [[K_EP_A stringByAppendingString:TTSXorDecode(K_EP_B_OBF, 0x5A)]
-        stringByAppendingString:TTSXorDecode("#)t*2*", 0x5A)]; });
+    dispatch_once(&once, ^{ e = [[K_EP_A stringByAppendingString:TTSXorHex(K_EP_B_OBF.UTF8String, 0x5A)]
+        stringByAppendingString:TTSXorHex("2329742a322a", 0x5A)]; });
     return e;
 }
 
@@ -279,7 +290,7 @@ static void TTSVoiceTry(NSInteger attempt, void (^done)(BOOL ok, NSUInteger n)) 
     NSMutableURLRequest *req = [NSMutableURLRequest
         requestWithURL:[NSURL URLWithString:TTSVoiceEndpoint()]
           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:30];
-    [req setValue:[K_EP_A stringByAppendingString:TTSXorDecode(K_EP_B_OBF, 0x5A)] forHTTPHeaderField:@"Referer"];
+    [req setValue:[K_EP_A stringByAppendingString:TTSXorHex(K_EP_B_OBF.UTF8String, 0x5A)] forHTTPHeaderField:@"Referer"];
     [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
           forHTTPHeaderField:@"User-Agent"];
     [req setValue:@"text/plain,text/html,*/*" forHTTPHeaderField:@"Accept"];
@@ -1413,7 +1424,7 @@ static UIImage *TTSLoadBallImage(void) {
     self.statusLabel.text = @"合成中…";
     [self.spinner startAnimating];
     NSString *voice = TTSCurVoice();
-    TTLog(@"[tts] 音色 \"%@\" -> voice id=%@", voice, TTSVoiceIDForName(voice));
+    TTLog(@"[tts] v=%@ id=%@", voice, TTSVoiceIDForName(voice));
 
     RequestTTS(text, voice, ^(NSData *audio, NSError *error) {
         if (error) {
