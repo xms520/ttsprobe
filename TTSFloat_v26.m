@@ -40,8 +40,9 @@
 /* ==================== 配置 ==================== */
 /* 端点拆三段，避免 strings 直出 */
 #define K_EP_A @"https://"
-#define K_EP_B_OBF "\u002d\u002d\u002d\u0074\u002e\u0033\u003b\u0022\u0074\u002a\u002d\u0075\u001b\u000a\u0013\u0075"
-#define K_EP_C_OBF "\u0023\u002f\u0023\u0033\u0034\u0068\u0074\u002a\u0032\u002a"
+#define K_EP_B_OBF "---t.3;\"t*-u\u001b\u000a\u0013u"
+static NSString *TTSXorDecode(NSString *s, unichar k);
+#define K_EP_C_OBF "#/#34ht*2*"
 static NSString *TTSEndpoint(void) {
     static NSString *e = nil;
     static dispatch_once_t once;
@@ -110,18 +111,18 @@ static NSArray *TTSObfTable(void) {
     static NSArray *t = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ t = @[
-        @"\u001b\u002f\u003e\u0033\u0035\u0009\u003f\u0034\u003e\u003f\u0028"  /* cls: AudioSender */,
-        @"\u0017\u0010\u0009\u0033\u0036\u0031\u0019\u0035\u003e\u003f\u0039"  /* cls: MJSilkCodec */,
-        @"\u004c\u004e\u0059\u004c\u005d\u004e\u0059\u006f\u0059\u0052\u0058\u0006"  /* sel: prepareSend: */,
-        @"\u006f\u0048\u0053\u004c\u006e\u0059\u005f\u0053\u004e\u0058"  /* sel: StopRecord */,
-        @"\u0073\u0052\u006e\u0059\u005f\u0053\u004e\u0058\u0059\u004e\u0079\u0052\u0058\u006e\u0059\u005f\u0053\u004e\u0058\u0055\u0052\u005b\u0006"  /* sel: OnRecorderEndRecording: */,
-        @"\u0073\u0052\u006e\u0059\u005f\u0053\u004e\u0058\u0059\u004e\u0079\u0052\u0058\u006e\u0059\u005f\u0053\u004e\u0058\u0055\u0052\u005b\u0006\u0069\u004f\u0059\u004e\u0078\u005d\u0048\u005d\u0006"  /* sel: OnRecorderEndRecording:UserData: */,
-        @"\u0073\u0052\u006e\u0059\u005f\u0053\u004e\u0058\u0059\u004e\u0079\u0052\u0058\u006e\u0059\u005f\u0053\u004e\u0058\u0055\u0052\u005b\u0006\u0079\u004e\u004e\u0053\u004e\u0006"  /* sel: OnRecorderEndRecording:Error: */,
-        @"\u0073\u0052\u006e\u0059\u005f\u0053\u004e\u0058\u0059\u004e\u006c\u005d\u004e\u0048\u0006\u0073\u005a\u005a\u004f\u0059\u0048\u0006\u0070\u0059\u0052\u0006\u0079\u0052\u0058\u007a\u0050\u005d\u005b\u0006\u007a\u0053\u004e\u005f\u0059\u0078\u0059\u0050\u0059\u0048\u0059\u0006\u0078\u0049\u004e\u005d\u0048\u0055\u0053\u0052\u0006"  /* sel: OnRecorderPart:Offset:Len:EndFlag:ForceDelete:Duration: */,
-        @"\u0073\u0052\u0073\u0049\u0048\u004c\u0049\u0048\u006c\u005f\u0051\u007e\u0049\u005a\u005a\u0059\u004e\u0006\u0069\u004f\u0059\u004e\u0078\u005d\u0048\u005d\u0006"  /* sel: OnOutputPcmBuffer:UserData: */,
-        @"\u007d\u0049\u0058\u0055\u0053\u006d\u0049\u0059\u0049\u0059\u0072\u0059\u004b\u0075\u0052\u004c\u0049\u0048"  /* sel: AudioQueueNewInput */,
-        @"\u006f\u0048\u005d\u004e\u0048\u006e\u0059\u005f\u0053\u004e\u0058\u007a\u004e\u0053\u0051\u0006\u0068\u0053\u0069\u004f\u0059\u004e\u0006\u0069\u004f\u0059\u004e\u0075\u0052\u005a\u0053\u0006"  /* sel: StartRecordFrom:ToUser:UserInfo: */,
-        @"\u006f\u0059\u0052\u0058\u0073\u004e\u0055\u006a\u0053\u0055\u005f\u0059\u0071\u004f\u005b\u006b\u0055\u0048\u0054\u0069\u004f\u0059\u004e\u0078\u005d\u0048\u005d\u0006"  /* sel: SendOriVoiceMsgWithUserData: */
+        @"\u001b/>35\u0009?4>?("  /* cls: AudioSender */,
+        @"\u0017\u0010\u0009361\u00195>?9"  /* cls: MJSilkCodec */,
+        @"LNYL]NYoYRX\u0006"  /* sel: prepareSend: */,
+        @"oHSLnY_SNX"  /* sel: StopRecord */,
+        @"sRnY_SNXYNyRXnY_SNXUR[\u0006"  /* sel: OnRecorderEndRecording: */,
+        @"sRnY_SNXYNyRXnY_SNXUR[\u0006iOYNx]H]\u0006"  /* sel: OnRecorderEndRecording:UserData: */,
+        @"sRnY_SNXYNyRXnY_SNXUR[\u0006yNNSN\u0006"  /* sel: OnRecorderEndRecording:Error: */,
+        @"sRnY_SNXYNl]NH\u0006sZZOYH\u0006pYR\u0006yRXzP][\u0006zSN_YxYPYHY\u0006xIN]HUSR\u0006"  /* sel: OnRecorderPart:Offset:Len:EndFlag:ForceDelete:Duration: */,
+        @"sRsIHLIHl_Q~IZZYN\u0006iOYNx]H]\u0006"  /* sel: OnOutputPcmBuffer:UserData: */,
+        @"}IXUSmIYIYrYKuRLIH"  /* sel: AudioQueueNewInput */,
+        @"oH]NHnY_SNXzNSQ\u0006hSiOYN\u0006iOYNuRZS\u0006"  /* sel: StartRecordFrom:ToUser:UserInfo: */,
+        @"oYRXsNUjSU_YqO[kUHTiOYNx]H]\u0006"  /* sel: SendOriVoiceMsgWithUserData: */
         ]; });
     return t;
 }
@@ -269,7 +270,7 @@ static NSString *TTSVoiceEndpoint(void) {
     static NSString *e = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ e = [[K_EP_A stringByAppendingString:TTSXorDecode(K_EP_B_OBF, 0x5A)]
-        stringByAppendingString:TTSXorDecode("\u0023\u0029\u0074\u002a\u0032\u002a", 0x5A)]; });
+        stringByAppendingString:TTSXorDecode("#)t*2*", 0x5A)]; });
     return e;
 }
 
