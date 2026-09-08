@@ -461,8 +461,25 @@ static NSString *TTSPeerFromChatVC(id vc) {
     }
     return nil;
 }
-/* 遍历 VC 树，返回第一个"像聊天页"的 VC */
+/* 遍历 VC 树，返回第一个"像聊天页"的 VC。
+ * v28 首版类名匹配（MsgContentViewController/ChatRoomView/BaseMsgContent）实测没命中
+ * → v28b 宽化：类名含 Message/Chat/Conversation 之一即算候选，再逐个试取用户名，
+ *   取到 wxid/chatroom 才认定。找不到时 dump 整棵 VC 类名树（打一次日志，用于人工定位）。 */
+static NSString *TTSPeerFromChatVC(id vc);
+
+static BOOL TTSLooksLikeChatVC(NSString *cn) {
+    if (!cn.length) return NO;
+    NSArray *keys = @[@"MsgContentViewController", @"BaseMsgContent", @"ChatRoomView",
+                      @"MessageViewController", @"ConversationView",
+                      @"Chat", @"Message"];
+    for (NSString *k in keys) {
+        if ([cn rangeOfString:k].location != NSNotFound) return YES;
+    }
+    return NO;
+}
 static id TTSFindChatVC(void) {
+    static BOOL dumped = NO;
+    id best = nil;
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
         UIViewController *root = w.rootViewController;
         if (!root) continue;
@@ -471,16 +488,22 @@ static id TTSFindChatVC(void) {
             UIViewController *cur = stack.lastObject;
             [stack removeLastObject];
             NSString *cn = NSStringFromClass([cur class]);
-            if ([cn rangeOfString:@"MsgContentViewController"].location != NSNotFound ||
-                [cn rangeOfString:@"ChatRoomView"].location != NSNotFound ||
-                [cn rangeOfString:@"BaseMsgContent"].location != NSNotFound) {
-                return cur;
+            /* v28b: 宽匹配 → 拿到候选先用 ivar 探测验证，能读出会话 id 才算数 */
+            if (TTSLooksLikeChatVC(cn)) {
+                NSString *peer = TTSPeerFromChatVC(cur);
+                if (peer.length) { dumped = YES; return cur; }
+                if (!best) best = cur;
+            }
+            if (!dumped) {
+                /* 诊断：把整棵 VC 树类名打出来（只打一次；行首 [vc-tree]） */
+                TTLog(@"[vc-tree] %@", cn);
             }
             if (cur.presentedViewController) [stack addObject:cur.presentedViewController];
             for (UIViewController *child in cur.childViewControllers) [stack addObject:child];
         }
+        if (!dumped) dumped = YES;   /* 第一个窗口树 dump 完就不再打 */
     }
-    return nil;
+    return best;
 }
 static NSString *TTSCurrentChatPeer(void) {
     static NSString *lastHit = nil;
@@ -1229,12 +1252,15 @@ static UIImage *TTSLoadBallImage(void) {
     vHint.font = [UIFont systemFontOfSize:14];
     [panel addSubview:vHint];
 
-    /* v28: 打开面板即显示当前聊天对象（自动识别） */
+    /* v28b: 打开面板即显示当前聊天对象；探测失败也打日志（区分两种失败） */
     NSString *curPeer = TTSCurrentChatPeer();
     if (curPeer.length) {
         TTLog(@"[chat] 面板打开，当前聊天: %@", curPeer);
         self.statusLabel.text = [NSString stringWithFormat:@"当前会话: %@", [curPeer length] > 18 ?
             [NSString stringWithFormat:@"…%@", [curPeer substringFromIndex:curPeer.length - 15]] : curPeer];
+    } else {
+        TTLog(@"[chat] 面板打开，未识别到聊天对象（看 [vc-tree] 输出定位类名）");
+        self.statusLabel.text = @"自动识别未命中（发日志给开发者）";
     }
 
     /* 音色异步加载完成后刷新标题 */
