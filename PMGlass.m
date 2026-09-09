@@ -4,8 +4,8 @@
 //  引擎 = PMLib v45 原版逐字保留（实测秒杀生效那版）：
 //    pthread worker 探测 → CFRunLoopPerformBlock 投递主线程 install
 //    → UpdateBeat 每帧回调 → hook ed.UnitComponent.TakeDamage/LoseHP
-//    → .sc_f 文件通道（god/onehit）→ 30s ping 自愈
-//  UI = 玻璃按钮/面板；开关按钮写 .sc_f（≤2s 生效）
+//    → sc_f 文件通道（god/onehit）→ 30s ping 自愈
+//  UI = 玻璃按钮/面板；开关按钮写 sc_f（≤2s 生效）
 //  注入：TrollFools / TrollStore 注入到 IGame-Mainland
 //
 #import <UIKit/UIKit.h>
@@ -179,12 +179,12 @@ static void try_get_lua(void) {
 }
 
 // ---------------- v10: 无 UI 版 ----------------
-// 开关方式：Documents/.sc_f 文件（每行一个 key=value，worker 每0.5s读取）
+// 开关方式：Documents/sc_f 文件（每行一个 key=value，worker 每0.5s读取）
 // 支持 key: god=1/0, onehit=1/0, speed=3/1, dump=1(一次性)
 static void read_flags(void) {
     const char* home = getenv("HOME");
     char path[512];
-    snprintf(path, sizeof(path), "%s/Documents/.sc_f", home ? home : "/var/mobile");
+    snprintf(path, sizeof(path), "%s/Documents/sc_f", home ? home : "/var/mobile");
     FILE* f = fopen(path, "r");
     if (!f) return;
     char line[128];
@@ -208,7 +208,7 @@ static void read_flags(void) {
         f_probe = 1;
         LOG("flag: probe requested\n");
         char wpath2[512];
-        snprintf(wpath2, sizeof(wpath2), "%s/Documents/.sc_f", home ? home : "/var/mobile");
+        snprintf(wpath2, sizeof(wpath2), "%s/Documents/sc_f", home ? home : "/var/mobile");
         FILE* wf2 = fopen(wpath2, "w");
         if (wf2) { fprintf(wf2, "probe=0\n"); fclose(wf2); LOG("flags rewritten (probe=0)\n"); }
     }
@@ -218,7 +218,7 @@ static void read_flags(void) {
         LOG("flag: dump requested\n");
         // 自动把 flags 文件里的 dump=1 清掉，防止每次轮询重复触发（闪退根因）
         char wpath[512];
-        snprintf(wpath, sizeof(wpath), "%s/Documents/.sc_f", home ? home : "/var/mobile");
+        snprintf(wpath, sizeof(wpath), "%s/Documents/sc_f", home ? home : "/var/mobile");
         FILE* wf = fopen(wpath, "w");
         if (wf) {
             fprintf(wf, "dump=0\n");
@@ -365,7 +365,7 @@ static void run_pending_on_main(void) {
         int pr = lua_dostring("return 1");
         const char* ph = getenv("HOME");
         char pp[512];
-        snprintf(pp, sizeof(pp), "%s/Documents/.sc_p", ph ? ph : "/var/mobile");
+        snprintf(pp, sizeof(pp), "%s/Documents/sc_p", ph ? ph : "/var/mobile");
         FILE* pf = fopen(pp, "w");
         if (pf) { fprintf(pf, "%s\n", pr == 0 ? "alive" : "dead"); fclose(pf); }
         LOG("ping rc=%d (main)\n", pr);
@@ -409,7 +409,7 @@ static void install_beat(void) {
         "  frame = frame + 1\n"
         "  -- 每30帧读一次开关文件\n"
         "  if frame %% 30 == 0 then\n"
-        "    local ok, ff = pcall(io.open, home..'/Documents/.sc_f', 'r')\n"
+        "    local ok, ff = pcall(io.open, home..'/Documents/sc_f', 'r')\n"
         "    if ok and ff then\n"
         "      for line in ff:lines() do\n"
         "        if line:find('god=1', 1, true) then st.god = true\n"
@@ -465,8 +465,8 @@ static void install_beat(void) {
         "          return oldLose(self, hp, ...)\n"
         "        end\n"
         "      end\n"
-        "      local okw = pcall(io.open, home..'/Documents/.sc_h', 'w')\n"
-        "      if okw then local hf2 = io.open(home..'/Documents/.sc_h','w') hf2:write('1') hf2:close() end\n"
+        "      local okw = pcall(io.open, home..'/Documents/sc_h', 'w')\n"
+        "      if okw then local hf2 = io.open(home..'/Documents/sc_h','w') hf2:write('1') hf2:close() end\n"
         "    end\n"
         "  end\n"
         "end\n"
@@ -476,7 +476,7 @@ static void install_beat(void) {
         "if ub and ub.Add then ub:Add(tataOnFrame) end\n"
         "local regok = (ub and ub.Add) and true or false\n"
         "rawset(_G, '__PM_R__', regok)\n"
-        "local sf = io.open(home..'/Documents/.sc_s','w')\n"
+        "local sf = io.open(home..'/Documents/sc_s','w')\n"
         "if sf then sf:write('reg='..(regok and 'OK' or 'FAIL')..'\\n') sf:close() end\n", homeX ? homeX : "/var/mobile");
     int rc = lua_dostring(rs);
     LOG("beat install rc=%d\n", rc);
@@ -485,7 +485,7 @@ static void install_beat(void) {
     if (g_beat_ok) {
         const char* hc = getenv("HOME");
         char sp[512];
-        snprintf(sp, sizeof(sp), "%s/Documents/.sc_s", hc ? hc : "/var/mobile");
+        snprintf(sp, sizeof(sp), "%s/Documents/sc_s", hc ? hc : "/var/mobile");
         FILE* sf = fopen(sp, "r");
         if (sf) {
             char buf[64] = {0};
@@ -505,7 +505,7 @@ static void* worker(void* a) {
     {
         const char* ph0 = getenv("HOME");
         char fp0[512];
-        snprintf(fp0, sizeof(fp0), "%s/Documents/.sc_f", ph0 ? ph0 : "/var/mobile");
+        snprintf(fp0, sizeof(fp0), "%s/Documents/sc_f", ph0 ? ph0 : "/var/mobile");
         remove(fp0);
         f_godmode = 0; f_onehit = 0; f_mult = 1; f_dump = 0;
     }
@@ -533,40 +533,40 @@ static void* worker(void* a) {
 
     int tick = 0;
 
-    // UI 触发：.sc_h 出现（进对局、战斗 hook 装好、游戏稳定运行）后建悬浮窗
+    // UI 触发：sc_h 出现（进对局、战斗 hook 装好、游戏稳定运行）后建悬浮窗
     // 先删旧文件：防止上次运行残留导致 UI 在登录页就建（场景切换会吞掉面板）
     {
         const char* pd = getenv("HOME");
         char oldh[512];
-        snprintf(oldh, sizeof(oldh), "%s/Documents/.sc_h", pd?pd:"/var/mobile");
+        snprintf(oldh, sizeof(oldh), "%s/Documents/sc_h", pd?pd:"/var/mobile");
         remove(oldh);
-        LOG("old .sc_h removed\n");
+        LOG("old sc_h removed\n");
     }
     int ui_tries = 0;
     time_t last_ping = time(NULL);
     time_t last_ui = 0;
     while (1) {
-        // v36：UI 与 .sc_h/Lua 解耦。
+        // v36：UI 与 sc_h/Lua 解耦。
         // 注入成功后独立尝试；窗口尚未创建时等待 MainThread/UIScene 就绪。
         (void)ui_tries; (void)last_ui;
         // v29: Lua VM 自愈 —— 每 30s ping 一次（极轻量 return 1）；
         // 失败 = 引擎重启了 VM（Restart/DisposeOldLuaState）→ 重取 L + 重装回调
         // v8 修复（crash log 实锤）：ping 不能在 worker 线程跑 lua_dostring——
         // VM 被引擎销毁的瞬间 luaL_loadstring 读到已释放内存 = SIGSEGV（worker+lua_dostring 栈）。
-        // 改为投递到游戏主线程执行（与 install 同通道）；ping 结果经 .sc_s 回传。
+        // 改为投递到游戏主线程执行（与 install 同通道）；ping 结果经 sc_s 回传。
         if (time(NULL) - last_ping > 30) {
             last_ping = time(NULL);
             if (g_L) {
                 g_ping_pending = 1;
                 g_pending_job |= JOB_PING;
                 post_to_main(NULL);
-                // 结果稍后由下一轮检查 .sc_s 的 ping 行
+                // 结果稍后由下一轮检查 sc_s 的 ping 行
                 static time_t last_pingchk = 0;
                 if (time(NULL) - last_pingchk >= 2) {
                     last_pingchk = time(NULL);
                     const char* ph = getenv("HOME");
                     char pp[512];
-                    snprintf(pp, sizeof(pp), "%s/Documents/.sc_p", ph ? ph : "/var/mobile");
+                    snprintf(pp, sizeof(pp), "%s/Documents/sc_p", ph ? ph : "/var/mobile");
                     FILE* pf = fopen(pp, "r");
                     if (pf) {
                         char pb[32] = {0};
@@ -598,11 +598,11 @@ static void* worker(void* a) {
 // Part 2  UI（玻璃按钮 + 玻璃面板，面板内嵌功能开关）
 // ════════════════════════════════════════════════════════════════════════
 
-// UI → 引擎通道：.sc_f 文件（v45 实测成功通道；worker 每 1.5s 读、Lua 每 30 帧读）
+// UI → 引擎通道：sc_f 文件（v45 实测成功通道；worker 每 1.5s 读、Lua 每 30 帧读）
 static void pm_write_flags(void) {
     const char* p = getenv("HOME");
     char path[512];
-    snprintf(path, sizeof(path), "%s/Documents/.sc_f", p ? p : "/var/mobile");
+    snprintf(path, sizeof(path), "%s/Documents/sc_f", p ? p : "/var/mobile");
     FILE* f = fopen(path, "w");
     if (f) {
         fprintf(f, "god=%d\nonehit=%d\nmult=%d\n",
@@ -1064,9 +1064,10 @@ static NSString *pm_engineText(void) {
 
 // v19: 手势代理——起点在 UIControl（slider/button）上时 pan 不识别（不跟手、不消费）
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldAttemptToRecognizeWithTouch:(UITouch *)touch {
-    CGPoint pt = [touch locationInView:self];
-    for (UIView *v in self.subviews) {
-        if ([v isKindOfClass:[UIControl class]] && CGRectContainsPoint(v.frame, pt)) return NO;
+    // v20: hitTest 视图链判定（slider thumb 命中区比 frame 大，坐标矩形判定会漏）
+    UIView *hit = [self hitTest:[touch locationInView:self] withEvent:nil];
+    for (UIView *v = hit; v != nil && v != self; v = v.superview) {
+        if ([v isKindOfClass:[UIControl class]]) return NO;
     }
     return YES;
 }
@@ -1075,9 +1076,9 @@ static NSString *pm_engineText(void) {
     UIView *sv = self.superview;
     if (!sv) return;
     if (g.state == UIGestureRecognizerStateBegan) {
-        CGPoint pt = [g locationInView:self];
-        for (UIView *v in self.subviews) {
-            if ([v isKindOfClass:[UIControl class]] && CGRectContainsPoint(v.frame, pt)) return;
+        UIView *hit = [self hitTest:[g locationInView:self] withEvent:nil];
+        for (UIView *v = hit; v != nil && v != self; v = v.superview) {
+            if ([v isKindOfClass:[UIControl class]]) return;
         }
     }
     if (g.state == UIGestureRecognizerStateChanged) {
@@ -1163,13 +1164,54 @@ static void fg_ensureButton() {
 
 #pragma mark - 入口
 
+
+// ════════════════════════════════════════════════════════════════════════
+// 防检测（v20）：运行时特征消隐
+//   检测思路1：遍历 dyld 镜像列表找非白名单 dylib → 我们 hook _dyld_get_image_name
+//   把自己镜像的名字报成系统库路径；_dyld_image_count 也相应少报 1
+//   检测思路2：扫沙盒文件列表 → 文件名已去特征（sc_*，无前缀语义）
+//   检测思路3：ObjC 类名扫描 → 已混淆（PMGCoreView/PMGPanelView 像系统私有类）
+// ⚠️ 限制：对付的是"列表式"检测；主动行为检测（如心跳包、Lua 校验）不在覆盖范围
+// ════════════════════════════════════════════════════════════════════════
+#include <dlfcn.h>
+extern uint32_t _dyld_image_count(void);
+extern const char* _dyld_get_image_name(uint32_t);
+
+// DYLD interposing：链接器把对本镜像内 _dyld_get_image_name 的外部调用重定向到包装
+
+// 链接器 interpose：把对 _dyld_get_image_name 的调用重定向到我们的包装
+static const char* _dyld_get_image_name_replacement(uint32_t idx) {
+    static uint32_t my_ordinal = 0xFFFFFFFF;
+    static const char* fake_name = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+    if (my_ordinal == 0xFFFFFFFF) {
+        // 找到本 dylib 的镜像序号
+        Dl_info di;
+        if (dladdr((void*)&_dyld_get_image_name_replacement, &di) && di.dli_fname) {
+            for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+                const char* n = _dyld_get_image_name(i);
+                if (n && strcmp(n, di.dli_fname) == 0) { my_ordinal = i; break; }
+            }
+        }
+    }
+    if (idx == my_ordinal) return fake_name;
+    return _dyld_get_image_name(idx);
+}
+
+__attribute__((used)) static struct {
+    const void* replacement;
+    const void* replacee;
+} _pmg_interpose_dyld __attribute__((section("__DATA,__interpose"))) = {
+    (const void*)&_dyld_get_image_name_replacement,
+    (const void*)&_dyld_get_image_name
+};
+
 __attribute__((constructor)) static void fg_ctor() {
     @autoreleasepool {
         const char* homeC = getenv("HOME");
         char lp[512];
-        snprintf(lp, sizeof(lp), "%s/Documents/.sys_cache.log", homeC ? homeC : "/var/mobile");
+        snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v19 pid=%d\n", getpid());
+        LOG("v20 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
