@@ -50,7 +50,7 @@ static void* (*I_thread_attach)(Il2CppDomain*);
 static void* g_uf = NULL;
 static lua_State* g_L = NULL;
 
-static volatile int f_godmode = 0, f_onehit = 0, f_speed = 0, f_dump = 0;   // onehit: 0=关 1=温和x1000 2=暴力（纯三态）
+static volatile int f_godmode = 0, f_onehit = 0, f_dump = 0;   // onehit: 0=关 1=温和x1000 2=暴力（纯三态）
 static volatile int f_mult = 1;   // 攻击倍率独立状态：1..10（1=原始伤害）；与秒杀完全解耦
 static volatile int f_probe = 0;
 static int g_dump_done = 0, g_probe_done = 0;  // 一次性动作防重入
@@ -128,7 +128,7 @@ static int lua_dostring(const char* code) {
 
 static void sync_cfg(void) {
     // v11 前：开关仅记录状态（Lua 侧 hook 等全局表分析后再接）
-    LOG("cfg sync: god=%d onehit=%d speed=%d mult=x%d\n", f_godmode, f_onehit, f_speed, f_mult);
+    LOG("cfg sync: god=%d onehit=%d mult=x%d\n", f_godmode, f_onehit, f_mult);
 }
 
 static void try_get_lua(void) {
@@ -188,7 +188,7 @@ static void read_flags(void) {
     FILE* f = fopen(path, "r");
     if (!f) return;
     char line[128];
-    int newgod = f_godmode, newhit = f_onehit, newspd = f_speed, newmult = f_mult, newdump = 0, newprobe = 0;
+    int newgod = f_godmode, newhit = f_onehit, newmult = f_mult, newdump = 0, newprobe = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "god=1", 5) == 0) newgod = 1;
         else if (strncmp(line, "god=0", 5) == 0) newgod = 0;
@@ -196,17 +196,12 @@ static void read_flags(void) {
         else if (strncmp(line, "onehit=2", 8) == 0) newhit = 2;
         else if (strncmp(line, "onehit=0", 8) == 0) newhit = 0;
         else if (strncmp(line, "mult=", 5) == 0) { int m = atoi(line + 5); if (m >= 1 && m <= 10) newmult = m; }
-        else if (strncmp(line, "speed=3", 7) == 0) newspd = 2;
-        else if (strncmp(line, "speed=2", 7) == 0) newspd = 1;
-        else if (strncmp(line, "speed=0.5", 9) == 0) newspd = 3;
-        else if (strncmp(line, "speed=1", 7) == 0) newspd = 0;
         else if (strncmp(line, "dump=1", 6) == 0) newdump = 1;
         else if (strncmp(line, "probe=1", 7) == 0) newprobe = 1;
     }
     fclose(f);
     if (newgod != f_godmode) { f_godmode = newgod; LOG("flag: god=%d\n", newgod); sync_cfg(); }
     if (newhit != f_onehit) { f_onehit = newhit; LOG("flag: onehit=%d\n", newhit); sync_cfg(); }
-    if (newspd != f_speed)  { f_speed = newspd; LOG("flag: speed=%d (%s)\n", newspd, newspd==0?"off":newspd==1?"2x":newspd==2?"3x":"half"); sync_cfg(); }
     if (newmult != f_mult)  { f_mult = newmult; LOG("flag: mult=x%d\n", newmult); sync_cfg(); }
     if (newprobe && !g_probe_done) {
         g_probe_done = 1;
@@ -406,7 +401,7 @@ static void install_beat(void) {
     char rs[4096];
     snprintf(rs, sizeof(rs),
         // 主回调：状态轮询 + hook 安装，全部游戏主线程执行
-        "rawset(_G, '__PM_S__', {god=false, onehit=false, speed=1, mult=1})\n"
+        "rawset(_G, '__PM_S__', {god=false, onehit=false, mult=1})\n"
         "local home = '%s'\n"
         "local st = rawget(_G, '__PM_S__')\n"
         "local frame = 0\n"
@@ -423,15 +418,7 @@ static void install_beat(void) {
         "        elseif line:find('^onehit=1$', 1, false) then st.onehit = 1\n"
         "        elseif line:find('^onehit=0$', 1, false) then st.onehit = false\n"
         "        elseif line:find('^mult=', 1, false) then st.mult = tonumber(line:sub(6)) or st.mult\n"
-        "        elseif line:find('^speed=3$', 1, false) then st.speed = 3\n"
-        "        elseif line:find('^speed=2$', 1, false) then st.speed = 2\n"
-        "        elseif line:find('^speed=0%.5$', 1, false) then st.speed = 0.5\n"
-        "        elseif line:find('^speed=1$', 1, false) then st.speed = 1\n"
-
-"        elseif line:find('speed=3', 1, true) then st.speed = 3\n"
-"        elseif line:find('speed=2', 1, true) then st.speed = 2\n"
-"        elseif line:find('speed=0.5', 1, true) then st.speed = 0.5\n"
-"        elseif line:find('speed=1', 1, true) then st.speed = 1\n"
+                                
                 "        end\n"
         "      end\n"
         "      ff:close()\n"
@@ -442,17 +429,7 @@ static void install_beat(void) {
         "    local ed = rawget(_G, 'ed')\n"
         "    local UC = ed and ed.UnitComponent\n"
         "    if UC then\n"
-        "      local BE = ed.BattleEngine\n"
-        "      if BE and not rawget(_G, '__PM_SP__') and BE.GetTimeScale then\n"
-        "        rawset(_G, '__PM_SP__', true)\n"
-        "        local oldGTS = BE.GetTimeScale\n"
-        "        BE.GetTimeScale = function(self)\n"
-        "          local ts = oldGTS(self)\n"
-        "          local s2 = rawget(_G, '__PM_S__')\n"
-        "          if s2 and s2.speed and s2.speed > 1 then return ts * s2.speed end\n"
-        "          return ts\n"
-        "        end\n"
-        "      end\n"
+        
         "      rawset(_G, '__PM_H__', true)\n"
                 "      local oldTD = UC.TakeDamage\n"
         "      if oldTD then\n"
@@ -530,7 +507,7 @@ static void* worker(void* a) {
         char fp0[512];
         snprintf(fp0, sizeof(fp0), "%s/Documents/pm.flags", ph0 ? ph0 : "/var/mobile");
         remove(fp0);
-        f_godmode = 0; f_onehit = 0; f_speed = 0; f_mult = 1; f_dump = 0;
+        f_godmode = 0; f_onehit = 0; f_mult = 1; f_dump = 0;
     }
     int hb = 0;
     for (int i = 0; i < 1440; i++) {
@@ -628,10 +605,8 @@ static void pm_write_flags(void) {
     snprintf(path, sizeof(path), "%s/Documents/pm.flags", p ? p : "/var/mobile");
     FILE* f = fopen(path, "w");
     if (f) {
-        fprintf(f, "god=%d\nonehit=%d\nspeed=%s\nmult=%d\n",
-                (int)f_godmode, (int)f_onehit,
-                f_speed==1?"2":f_speed==2?"3":f_speed==3?"0.5":"1",
-                (int)f_mult);
+        fprintf(f, "god=%d\nonehit=%d\nmult=%d\n",
+                (int)f_godmode, (int)f_onehit, (int)f_mult);
         fclose(f);
     }
 }
@@ -673,13 +648,6 @@ static BOOL fg_shouldSkip(NSString *bid) {
 #pragma mark - 状态渲染（C 状态 → 面板控件）
 
 static NSString *pm_godText(void)    { return f_godmode ? @"无敌 · 开" : @"无敌 · 关"; }
-static NSString *pm_tsText(void) {
-    switch ((int)f_speed) {
-        case 1: return @"变速 · 2x";
-        case 2: return @"变速 · 3x";
-        case 3: return @"变速 · ½x";
-        default: return @"变速 · 关";
-    }
 }
 static NSString *pm_hitText(void) {
     return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关");
@@ -817,7 +785,7 @@ static NSString *pm_engineText(void) {
     if (g_panel) { [self fg_closePanel]; return; }
     UIWindow *kw = fg_keyWindow();
     if (!kw) return;
-    CGFloat pw = 280, ph = 470;
+    CGFloat pw = 280, ph = 370;
     FloatGlassPanel *p = [[FloatGlassPanel alloc] initWithFrame:
         CGRectMake((kw.bounds.size.width  - pw) / 2.0,
                    (kw.bounds.size.height - ph) / 2.0, pw, ph)];
@@ -837,7 +805,6 @@ static NSString *pm_engineText(void) {
 @implementation FloatGlassPanel {
     UIButton *_godBtn;
     UIButton *_hitBtn;
-    UIButton *_tsBtn;
     UIButton *_tipBtn;
     UILabel  *_engLabel;
     NSTimer  *_refreshTimer;
@@ -852,7 +819,7 @@ static NSString *pm_engineText(void) {
         self.layer.shadowOpacity = 0.42;
         self.layer.shadowRadius  = 22;
         self.layer.shadowOffset  = CGSizeMake(0, 8);
-        self.layer.cornerRadius  = 26;
+        self.layer.cornerRadius  = 20;
         self.clipsToBounds       = YES;
         self.backgroundColor     = [UIColor colorWithWhite:1.0 alpha:0.14];
 
@@ -887,12 +854,11 @@ static NSString *pm_engineText(void) {
         [self addSubview:title];
 
         // ── 功能开关（无敌/秒杀/变速）+ 引擎状态 + 打赏贴底 ──
-        _godBtn = [self pm_mkSwitch:CGRectMake(16, 56, 248, 46) title:pm_godText() action:@selector(pm_godTap:)];
-        _hitBtn = [self pm_mkSwitch:CGRectMake(16, 110, 248, 46) title:pm_hitText() action:@selector(pm_hitTap:)];
-        _tsBtn  = [self pm_mkSwitch:CGRectMake(16, 164, 248, 46) title:pm_tsText() action:@selector(pm_tsTap:)];
+        _godBtn = [self pm_mkSwitch:CGRectMake(16, 50, 248, 40) title:pm_godText() action:@selector(pm_godTap:)];
+        _hitBtn = [self pm_mkSwitch:CGRectMake(16, 96, 248, 40) title:pm_hitText() action:@selector(pm_hitTap:)];
 
-        // 攻击倍率拉条（x10 ~ x1000，实时写 pm.flags；秒杀三态按钮独立）
-        _multLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 216, 248, 18)];
+        // 攻击倍率拉条（x1 ~ x10）
+        _multLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 146, 248, 18)];
         _multLabel.text = @"攻击倍率 · x1(原始)";
         _multLabel.textAlignment = NSTextAlignmentCenter;
         _multLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.9];
@@ -900,7 +866,7 @@ static NSString *pm_engineText(void) {
         _multLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         [self addSubview:_multLabel];
 
-        _multSlider = [[UISlider alloc] initWithFrame:CGRectMake(24, 238, 232, 30)];
+        _multSlider = [[UISlider alloc] initWithFrame:CGRectMake(24, 168, 232, 30)];
         _multSlider.minimumValue = 0.0f;
         _multSlider.maximumValue = 1.0f;
         _multSlider.value = 0.0f;
@@ -910,7 +876,7 @@ static NSString *pm_engineText(void) {
         [self addSubview:_multSlider];
 
         // 引擎状态行
-        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 278, 248, 34)];
+        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 206, 248, 24)];
         _engLabel.text = pm_engineText();
         _engLabel.textAlignment = NSTextAlignmentCenter;
         _engLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
@@ -929,10 +895,11 @@ static NSString *pm_engineText(void) {
         [self addSubview:close];
 
         // 打赏按钮（面板最下方）
-        _tipBtn = [self pm_mkTipButton:CGRectMake(16, self.bounds.size.height - 46 - 16, 248, 46)];
+        _tipBtn = [self pm_mkTipButton:CGRectMake(16, self.bounds.size.height - 40 - 12, 248, 40)];
 
         // 拖动：可全屏任意移动
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(fg_drag:)];
+        pan.cancelsTouchesInView = NO;
         [self addGestureRecognizer:pan];
 
         // 状态自刷新（0.5s；UI 线程安全；VM 自愈后自动追上）
@@ -948,7 +915,7 @@ static NSString *pm_engineText(void) {
     // 打赏按钮：暖色调玻璃风
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = frame;
-    b.layer.cornerRadius = 14;
+    b.layer.cornerRadius = 10;
     b.layer.borderWidth  = 1.0 / [UIScreen mainScreen].scale;
     b.layer.borderColor  = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
     b.backgroundColor    = [UIColor colorWithRed:0.98 green:0.75 blue:0.30 alpha:0.30];
@@ -1026,7 +993,7 @@ static NSString *pm_engineText(void) {
 - (UIButton *)pm_mkSwitch:(CGRect)frame title:(NSString *)t action:(SEL)a {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = frame;
-    b.layer.cornerRadius = 14;
+    b.layer.cornerRadius = 10;
     b.layer.borderWidth  = 1.0 / [UIScreen mainScreen].scale;
     b.layer.borderColor  = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
     b.backgroundColor    = [UIColor colorWithWhite:1.0 alpha:0.16];
@@ -1068,14 +1035,6 @@ static NSString *pm_engineText(void) {
     LOG("ui: mult=x%d\n", m);
 }
 
-- (void)pm_tsTap:(id)sender {
-    (void)sender;
-    // 关 → 2x → 3x → ½x → 关（f_speed 0..3；写 pm.flags 由引擎 Lua 侧 BattleEngine hook 应用）
-    f_speed = (f_speed + 1) % 4;
-    pm_write_flags();
-    [_tsBtn setTitle:pm_tsText() forState:UIControlStateNormal];
-    LOG("ui: speed=%d\n", (int)f_speed);
-}
 
 - (void)pm_tipTap:(id)sender {
     (void)sender;
@@ -1087,7 +1046,6 @@ static NSString *pm_engineText(void) {
     _engLabel.text = pm_engineText();
     [_godBtn setTitle:pm_godText() forState:UIControlStateNormal];
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
-    [_tsBtn setTitle:pm_tsText() forState:UIControlStateNormal];
     _multLabel.text = (f_mult <= 1) ? @"攻击倍率 · x1(原始)" :
                       [NSString stringWithFormat:@"攻击倍率 · x%d", (int)f_mult];
 }
@@ -1102,6 +1060,12 @@ static NSString *pm_engineText(void) {
 - (void)fg_drag:(UIPanGestureRecognizer *)g {
     UIView *sv = self.superview;
     if (!sv) return;
+    if (g.state == UIGestureRecognizerStateBegan) {
+        CGPoint pt = [g locationInView:self];
+        for (UIView *v in self.subviews) {
+            if ([v isKindOfClass:[UIControl class]] && CGRectContainsPoint(v.frame, pt)) return;
+        }
+    }
     if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:sv];
         CGPoint c = self.center;
@@ -1191,7 +1155,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v17 pid=%d\n", getpid());
+        LOG("PMGlass v18 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
