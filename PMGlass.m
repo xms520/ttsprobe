@@ -399,8 +399,10 @@ static void install_beat_via_runloop(void) {
 static void install_beat(void) {
     if (!g_L) return;
     const char* homeX = getenv("HOME");
-    char rs[4096];
-    snprintf(rs, sizeof(rs),
+    // v26: 4096 → 8192——v24 加诊断 dump + v25 实时校验后脚本展开 >4.4KB（真机路径填充），
+    // 4096 溢出截断 → Lua 在截断点报 "function arguments expected" → 引擎装不上（功能全无）
+    char rs[8192];
+    int n_w = snprintf(rs, sizeof(rs),
         // 主回调：状态轮询 + hook 安装，全部游戏主线程执行
         "rawset(_G, '__PM_S__', {god=false, onehit=false, mult=1})\n"
         "local home = '%s'\n"
@@ -511,8 +513,14 @@ static void install_beat(void) {
         "rawset(_G, '__PM_R__', regok)\n"
         "local sf = io.open(home..'/Documents/sc_s','w')\n"
         "if sf then sf:write('reg='..(regok and 'OK' or 'FAIL')..'\\n') sf:close() end\n", homeX ? homeX : "/var/mobile");
+    // v26: 截断检查（n_w >= sizeof = 被截断，绝不再静默跑半个脚本）
+    if (n_w < 0 || (size_t)n_w >= sizeof(rs)) {
+        LOG("script truncated! need=%d buf=%zu\n", n_w, sizeof(rs));
+        g_beat_ok = 0;
+        return;
+    }
     int rc = lua_dostring(rs);
-    LOG("beat install rc=%d\n", rc);
+    LOG("beat install rc=%d (script %d bytes)\n", rc, n_w);
     g_beat_ok = (rc == 0);
     // v12: install 成功后顺带验证 reg（UpdateBeat 是否真挂上）——reg=FAIL 视为未装好，30s 后重试
     if (g_beat_ok) {
@@ -1211,7 +1219,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v25 pid=%d\n", getpid());
+        LOG("v26 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
