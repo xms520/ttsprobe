@@ -50,7 +50,8 @@ static void* (*I_thread_attach)(Il2CppDomain*);
 static void* g_uf = NULL;
 static lua_State* g_L = NULL;
 
-static volatile int f_godmode = 0, f_onehit = 0, f_speed = 0, f_dump = 0;   // f_onehit: 0=关 1=温和x1000 2=暴力；拉条 x2..x10 编码为 20..28（避开三态 0/1/2），Lua 解码 mult-18
+static volatile int f_godmode = 0, f_onehit = 0, f_speed = 0, f_dump = 0;   // onehit: 0=关 1=温和x1000 2=暴力（纯三态）
+static volatile int f_mult = 1;   // 攻击倍率独立状态：1..10（1=原始伤害）；与秒杀完全解耦
 static volatile int f_probe = 0;
 static int g_dump_done = 0, g_probe_done = 0;  // 一次性动作防重入
 static FILE* g_log = NULL;
@@ -127,7 +128,7 @@ static int lua_dostring(const char* code) {
 
 static void sync_cfg(void) {
     // v11 前：开关仅记录状态（Lua 侧 hook 等全局表分析后再接）
-    LOG("cfg sync: god=%d onehit=%d speed=%d\n", f_godmode, f_onehit, f_speed);
+    LOG("cfg sync: god=%d onehit=%d speed=%d mult=x%d\n", f_godmode, f_onehit, f_speed, f_mult);
 }
 
 static void try_get_lua(void) {
@@ -187,14 +188,14 @@ static void read_flags(void) {
     FILE* f = fopen(path, "r");
     if (!f) return;
     char line[128];
-    int newgod = f_godmode, newhit = f_onehit, newspd = f_speed, newdump = 0, newprobe = 0;
+    int newgod = f_godmode, newhit = f_onehit, newspd = f_speed, newmult = f_mult, newdump = 0, newprobe = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "god=1", 5) == 0) newgod = 1;
         else if (strncmp(line, "god=0", 5) == 0) newgod = 0;
         else if (strncmp(line, "onehit=1", 8) == 0) newhit = 1;
         else if (strncmp(line, "onehit=2", 8) == 0) newhit = 2;
         else if (strncmp(line, "onehit=0", 8) == 0) newhit = 0;
-        else if (strncmp(line, "onehit=", 7) == 0) { int m = atoi(line + 7); if (m >= 20 && m <= 28) newhit = m; }
+        else if (strncmp(line, "mult=", 5) == 0) { int m = atoi(line + 5); if (m >= 1 && m <= 10) newmult = m; }
         else if (strncmp(line, "speed=3", 7) == 0) newspd = 2;
         else if (strncmp(line, "speed=2", 7) == 0) newspd = 1;
         else if (strncmp(line, "speed=0.5", 9) == 0) newspd = 3;
@@ -206,6 +207,7 @@ static void read_flags(void) {
     if (newgod != f_godmode) { f_godmode = newgod; LOG("flag: god=%d\n", newgod); sync_cfg(); }
     if (newhit != f_onehit) { f_onehit = newhit; LOG("flag: onehit=%d\n", newhit); sync_cfg(); }
     if (newspd != f_speed)  { f_speed = newspd; LOG("flag: speed=%d (%s)\n", newspd, newspd==0?"off":newspd==1?"2x":newspd==2?"3x":"half"); sync_cfg(); }
+    if (newmult != f_mult)  { f_mult = newmult; LOG("flag: mult=x%d\n", newmult); sync_cfg(); }
     if (newprobe && !g_probe_done) {
         g_probe_done = 1;
         f_probe = 1;
@@ -404,7 +406,7 @@ static void install_beat(void) {
     char rs[4096];
     snprintf(rs, sizeof(rs),
         // 主回调：状态轮询 + hook 安装，全部游戏主线程执行
-        "rawset(_G, '__PM_S__', {god=false, onehit=false, speed=1})\n"
+        "rawset(_G, '__PM_S__', {god=false, onehit=false, speed=1, mult=1})\n"
         "local home = '%s'\n"
         "local st = rawget(_G, '__PM_S__')\n"
         "local frame = 0\n"
@@ -417,12 +419,14 @@ static void install_beat(void) {
         "      for line in ff:lines() do\n"
         "        if line:find('god=1', 1, true) then st.god = true\n"
         "        elseif line:find('god=0', 1, true) then st.god = false\n"
-        "        elseif line:find('onehit=2', 1, true) then st.onehit = 2\n"
-        "        elseif line:find('onehit=1', 1, true) then st.onehit = 1\n"
-        "        elseif line:find('onehit=0', 1, true) then st.onehit = false\n"
-"        elseif line:find('onehit=', 1, true) then\n"
-"          local m = tonumber(line:match('onehit=(%%d+)'))\n"
-"          if m and m >= 20 and m <= 28 then st.onehit = m end\n"
+        "        elseif line:find('^onehit=2$', 1, false) then st.onehit = 2\n"
+        "        elseif line:find('^onehit=1$', 1, false) then st.onehit = 1\n"
+        "        elseif line:find('^onehit=0$', 1, false) then st.onehit = false\n"
+        "        elseif line:find('^mult=', 1, false) then st.mult = tonumber(line:sub(6)) or st.mult\n"
+        "        elseif line:find('^speed=3$', 1, false) then st.speed = 3\n"
+        "        elseif line:find('^speed=2$', 1, false) then st.speed = 2\n"
+        "        elseif line:find('^speed=0%.5$', 1, false) then st.speed = 0.5\n"
+        "        elseif line:find('^speed=1$', 1, false) then st.speed = 1\n"
 
 "        elseif line:find('speed=3', 1, true) then st.speed = 3\n"
 "        elseif line:find('speed=2', 1, true) then st.speed = 2\n"
@@ -454,15 +458,18 @@ static void install_beat(void) {
         "      if oldTD then\n"
         "        UC.TakeDamage = function(self, dmg, ...)\n"
         "          local s = rawget(_G, '__PM_S__')\n"
-        "          if s and (s.god or s.onehit) then\n"
+        "          if s then\n"
         "            local isZ = false\n"
         "            if self.IsZombie then isZ = self.IsZombie(self) end\n"
         "            if not isZ and self.IsFieldNpc then isZ = self.IsFieldNpc(self) end\n"
         "            if s.god and not isZ then return end\n"
+        "            -- onehit (standalone, priority): x1000 mild / 9e15 brutal\n"
         "            if s.onehit and isZ then\n"
         "              if s.onehit == 1 then dmg = dmg * 1000\n"
-        "              elseif s.onehit == 2 then dmg = 9e15\n"
-        "              else dmg = dmg * (s.onehit - 18) end\n"
+        "              elseif s.onehit == 2 then dmg = 9e15 end\n"
+        "            -- mult (standalone slider, applies when onehit off): dmg * mult\n"
+        "            elseif s.mult and s.mult > 1 then\n"
+        "              dmg = dmg * s.mult\n"
         "            end\n"
         "          end\n"
         "          return oldTD(self, dmg, ...)\n"
@@ -523,7 +530,7 @@ static void* worker(void* a) {
         char fp0[512];
         snprintf(fp0, sizeof(fp0), "%s/Documents/pm.flags", ph0 ? ph0 : "/var/mobile");
         remove(fp0);
-        f_godmode = 0; f_onehit = 0; f_speed = 0; f_dump = 0;
+        f_godmode = 0; f_onehit = 0; f_speed = 0; f_mult = 1; f_dump = 0;
     }
     int hb = 0;
     for (int i = 0; i < 1440; i++) {
@@ -621,9 +628,10 @@ static void pm_write_flags(void) {
     snprintf(path, sizeof(path), "%s/Documents/pm.flags", p ? p : "/var/mobile");
     FILE* f = fopen(path, "w");
     if (f) {
-        fprintf(f, "god=%d\nonehit=%d\nspeed=%s\n",
+        fprintf(f, "god=%d\nonehit=%d\nspeed=%s\nmult=%d\n",
                 (int)f_godmode, (int)f_onehit,
-                f_speed==1?"2":f_speed==2?"3":f_speed==3?"0.5":"1");   // onehit: 0/1/2 三态 或 10..1000 拉条值
+                f_speed==1?"2":f_speed==2?"3":f_speed==3?"0.5":"1",
+                (int)f_mult);
         fclose(f);
     }
 }
@@ -674,7 +682,6 @@ static NSString *pm_tsText(void) {
     }
 }
 static NSString *pm_hitText(void) {
-    if (f_onehit >= 20) return [NSString stringWithFormat:@"秒杀 · x%d", (int)f_onehit - 18];
     return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关");
 }
 static NSString *pm_engineText(void) {
@@ -886,7 +893,7 @@ static NSString *pm_engineText(void) {
 
         // 攻击倍率拉条（x10 ~ x1000，实时写 pm.flags；秒杀三态按钮独立）
         _multLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 216, 248, 18)];
-        _multLabel.text = @"攻击倍率 · x1(关)";
+        _multLabel.text = @"攻击倍率 · x1(原始)";
         _multLabel.textAlignment = NSTextAlignmentCenter;
         _multLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.9];
         _multLabel.font = [UIFont boldSystemFontOfSize:13];
@@ -1043,31 +1050,22 @@ static NSString *pm_engineText(void) {
 
 - (void)pm_hitTap:(id)sender {
     (void)sender;
-    f_onehit = (f_onehit + 1) % 3;   // 关 → 温和(×1000) → 暴力(9e15) → 关（自定义倍率时归 0 重开）
+    f_onehit = (f_onehit + 1) % 3;   // 关 → 温和(×1000) → 暴力(9e15) → 关（纯三态，与拉条互不相干）
     pm_write_flags();
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
     LOG("ui: onehit=%d\n", (int)f_onehit);
 }
 
-// 攻击倍率拉条：x1..x10 线性整数档（x1 = 原始伤害 = 关）
+// 攻击倍率拉条：x1..x10 线性整数档（x1 = 原始伤害；与秒杀完全独立）
 - (void)pm_multChanged:(UISlider *)s {
-    // 线性映射到 1..10 整数档；v16: >=10 才写 f_onehit（x1 视为关，与三态语义无冲突）
     int m = (int)round(s.value * 9.0) + 1;   // 0..1 → 1..10
     if (m < 1) m = 1;
     if (m > 10) m = 10;
-    if (m == 1) {
-        // 关（只有拉条控制的自定义态才清零，不干扰三态按钮 0/1/2）
-        if (f_onehit >= 20) {
-            f_onehit = 0;
-            pm_write_flags();
-        }
-        _multLabel.text = @"攻击倍率 · x1(关)";
-        return;
-    }
-    f_onehit = m + 18;   // 编码：x2..x10 → 20..28（避开三态 0/1/2）
+    f_mult = m;                              // 独立状态，不碰 f_onehit
     pm_write_flags();
-    _multLabel.text = [NSString stringWithFormat:@"攻击倍率 · x%d", m];
-    LOG("ui: mult=x%d (code %d)\n", m, m + 18);
+    _multLabel.text = (m == 1) ? @"攻击倍率 · x1(原始)" :
+                      [NSString stringWithFormat:@"攻击倍率 · x%d", m];
+    LOG("ui: mult=x%d\n", m);
 }
 
 - (void)pm_tsTap:(id)sender {
@@ -1090,9 +1088,8 @@ static NSString *pm_engineText(void) {
     [_godBtn setTitle:pm_godText() forState:UIControlStateNormal];
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
     [_tsBtn setTitle:pm_tsText() forState:UIControlStateNormal];
-    if (f_onehit >= 20) _multLabel.text = [NSString stringWithFormat:@"攻击倍率 · x%d", (int)f_onehit - 18];
-    else if (f_onehit > 0) _multLabel.text = @"攻击倍率 · x1(关)";   // 三态秒杀激活时拉条显示关
-    else _multLabel.text = @"攻击倍率 · x1(关)";
+    _multLabel.text = (f_mult <= 1) ? @"攻击倍率 · x1(原始)" :
+                      [NSString stringWithFormat:@"攻击倍率 · x%d", (int)f_mult];
 }
 
 - (void)fg_close {
@@ -1194,7 +1191,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v16 pid=%d\n", getpid());
+        LOG("PMGlass v17 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
