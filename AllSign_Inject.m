@@ -135,8 +135,12 @@
         free(args.count ? (void *)[args[0] integerValue] : NULL);
         return @"✅ free 完成";
     } else if ([realTarget isEqualToString:@"system"]) {
+        // iOS SDK 将 system() 标记为 unavailable，经 dlsym 从 libSystem 解析调用
+        typedef int (*system_fn_t)(const char *);
+        system_fn_t sysfn = (system_fn_t)dlsym(RTLD_DEFAULT, "system");
+        if (!sysfn) return @"❌ system 符号解析失败";
         const char *c = args.count ? [args[0] UTF8String] : "echo Injected";
-        int rc = system(c);
+        int rc = sysfn(c);
         return [NSString stringWithFormat:@"✅ system = %d", rc];
     } else if ([realTarget isEqualToString:@"dlopen"]) {
         const char *p = args.count ? [args[0] UTF8String] : NULL;
