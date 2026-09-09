@@ -430,6 +430,25 @@ static void install_beat(void) {
         "    local ed = rawget(_G, 'ed')\n"
         "    local UC = ed and ed.UnitComponent\n"
         "    if UC then\n"
+        "      -- v24 诊断：一次性 dump ed.BattleConfig 全部键（找真实校验规则）\n"
+        "      if not rawget(_G, '__PM_DUMPED__') then\n"
+        "        rawset(_G, '__PM_DUMPED__', true)\n"
+        "        local df = io.open(home..'/Documents/sc_diag.txt', 'w')\n"
+        "        if df then\n"
+        "          local cfg = ed.BattleConfig\n"
+        "          if cfg then\n"
+        "            for k, v in pairs(cfg) do\n"
+        "              df:write(tostring(k)..' = '..tostring(v)..'\\n')\n"
+        "            end\n"
+        "          else\n"
+        "            df:write('no ed.BattleConfig\\n')\n"
+        "          end\n"
+        "          -- ed 顶层键也 dump（找上报/结算函数）\n"
+        "          df:write('---- ed keys ----\\n')\n"
+        "          for k in pairs(ed) do df:write(tostring(k)..'\\n') end\n"
+        "          df:close()\n"
+        "        end\n"
+        "      end\n"
         
         "      rawset(_G, '__PM_H__', true)\n"
                 "      local oldTD = UC.TakeDamage\n"
@@ -456,8 +475,8 @@ static void install_beat(void) {
         "              if s.onehit == 1 then\n"
         "                dmg = dmg * 1000\n"
         "              elseif s.onehit == 2 then\n"
-        "                if checkDmg == 1 then dmg = dmg * 1000\n"
-        "                else dmg = 9e15 end\n"  // 校验关降温和(x1000)可通关；普通关照旧秒杀
+        "                if checkDmg == 1 then dmg = dmg * 2\n"
+        "                else dmg = 9e15 end\n"  // v24: 校验关降 x2（x1000 实测仍被校验；x2 贴近暴击/buff 正常波动范围）
         "              end\n"
         "            -- mult (standalone slider, applies when onehit off): dmg * mult\n"
         "            elseif s.mult and s.mult > 1 then\n"
@@ -1212,7 +1231,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v23 pid=%d\n", getpid());
+        LOG("v24 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
