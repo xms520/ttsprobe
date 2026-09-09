@@ -464,20 +464,19 @@ static void install_beat(void) {
         "            -- v23: 服务器校验规避——校验关(BtCheckDmg)暴力档自动降为温和 x1000，\n"
         "            -- 避免回放对不上弹'与服务器不一致'（9e15 必被校验，x1000 在容差内）\n"
         "            if s.onehit and isZ then\n"
-        "              local checkDmg = rawget(_G, '__PM_CHECK__')\n"
-        "              if checkDmg == nil then\n"
-        "                local ed0 = rawget(_G, 'ed')\n"
-        "                local cfg = ed0 and ed0.BattleConfig\n"
-        "                local v = cfg and cfg.BtCheckDmg\n"
-        "                checkDmg = (v and v > 0) and 1 or 0\n"
-        "                rawset(_G, '__PM_CHECK__', checkDmg)\n"
-        "              end\n"
+        "              -- v25: 校验标记实时读（不缓存——v24 一局缓存锁死，后续普通关也被降档）\n"
+        "              local ed0 = rawget(_G, 'ed')\n"
+        "              local cfg = ed0 and ed0.BattleConfig\n"
+        "              local v = cfg and cfg.BtCheckDmg\n"
+        "              local checking = (v and v > 0)\n"
         "              if s.onehit == 1 then\n"
         "                dmg = dmg * 1000\n"
         "              elseif s.onehit == 2 then\n"
-        "                if checkDmg == 1 then dmg = dmg * 2\n"
-        "                else dmg = 9e15 end\n"  // v24: 校验关降 x2（x1000 实测仍被校验；x2 贴近暴击/buff 正常波动范围）
+        "                if checking then dmg = dmg * 2\n"   -- 校验关：x2（服务器容差内）
+        "                else dmg = 9e15 end\n"  -- 普通关：真秒杀
         "              end\n"
+        "              -- v25: 秒杀开着时倍率也叠加（秒杀温和档 x1000 * mult）\n"
+        "              if s.mult and s.mult > 1 and checking then dmg = dmg * s.mult end\n"
         "            -- mult (standalone slider, applies when onehit off): dmg * mult\n"
         "            elseif s.mult and s.mult > 1 then\n"
         "              dmg = dmg * s.mult\n"
@@ -682,6 +681,10 @@ static BOOL fg_shouldSkip(NSString *bid) {
 #pragma mark - 状态渲染（C 状态 → 面板控件）
 
 static NSString *pm_godText(void)    { return f_godmode ? @"无敌 · 开" : @"无敌 · 关"; }
+static NSString *pm_multText(void) {
+    return (f_mult <= 1) ? @"攻击倍率 · x1" :
+           [NSString stringWithFormat:@"攻击倍率 · x%d", (int)f_mult];
+}
 static NSString *pm_hitText(void) {
     return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关");
 }
@@ -841,8 +844,7 @@ static NSString *pm_engineText(void) {
     UIButton *_tipBtn;
     UILabel  *_engLabel;
     NSTimer  *_refreshTimer;
-    UISlider *_multSlider;      // 攻击倍率拉条（x10..x1000）
-    UILabel  *_multLabel;
+    UIButton *_multBtn;         // 攻击倍率按钮（x1..x10 循环，v25 拉条改按钮）
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -891,22 +893,8 @@ static NSString *pm_engineText(void) {
         _hitBtn = [self pm_mkSwitch:CGRectMake(16, 96, 248, 40) title:pm_hitText() action:@selector(pm_hitTap:)];
 
         // 攻击倍率拉条（x1 ~ x10）
-        _multLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 146, 248, 18)];
-        _multLabel.text = @"攻击倍率 · x1(原始)";
-        _multLabel.textAlignment = NSTextAlignmentCenter;
-        _multLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.9];
-        _multLabel.font = [UIFont boldSystemFontOfSize:13];
-        _multLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-        [self addSubview:_multLabel];
-
-        _multSlider = [[UISlider alloc] initWithFrame:CGRectMake(24, 168, 232, 30)];
-        _multSlider.minimumValue = 0.0f;
-        _multSlider.maximumValue = 1.0f;
-        _multSlider.value = 0.0f;
-        _multSlider.minimumTrackTintColor = [UIColor colorWithRed:0.98 green:0.45 blue:0.30 alpha:0.95];
-        _multSlider.tintColor = [UIColor colorWithWhite:1.0 alpha:0.6];
-        [_multSlider addTarget:self action:@selector(pm_multChanged:) forControlEvents:UIControlEventValueChanged];
-        [self addSubview:_multSlider];
+        // 攻击倍率按钮（x1..x10 循环点击；v25: 拉条改按钮）
+        _multBtn = [self pm_mkSwitch:CGRectMake(16, 146, 248, 40) title:pm_multText() action:@selector(pm_multTap:)];
 
         // 引擎状态行
         _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 206, 248, 24)];
@@ -1058,16 +1046,13 @@ static NSString *pm_engineText(void) {
     LOG("ui: onehit=%d\n", (int)f_onehit);
 }
 
-// 攻击倍率拉条：x1..x10 线性整数档（x1 = 原始伤害；与秒杀完全独立）
-- (void)pm_multChanged:(UISlider *)s {
-    int m = (int)round(s.value * 9.0) + 1;   // 0..1 → 1..10
-    if (m < 1) m = 1;
-    if (m > 10) m = 10;
-    f_mult = m;                              // 独立状态，不碰 f_onehit
+// 攻击倍率按钮：x1 → x2 → ... → x10 → x1 循环（与秒杀独立；秒杀开时校验关下叠加）
+- (void)pm_multTap:(id)sender {
+    (void)sender;
+    f_mult = (f_mult >= 10) ? 1 : (f_mult + 1);
     pm_write_flags();
-    _multLabel.text = (m == 1) ? @"攻击倍率 · x1(原始)" :
-                      [NSString stringWithFormat:@"攻击倍率 · x%d", m];
-    LOG("ui: mult=x%d\n", m);
+    [_multBtn setTitle:pm_multText() forState:UIControlStateNormal];
+    LOG("ui: mult=x%d\n", (int)f_mult);
 }
 
 
@@ -1081,12 +1066,7 @@ static NSString *pm_engineText(void) {
     _engLabel.text = pm_engineText();
     [_godBtn setTitle:pm_godText() forState:UIControlStateNormal];
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
-    _multLabel.text = (f_mult <= 1) ? @"攻击倍率 · x1(原始)" :
-                      [NSString stringWithFormat:@"攻击倍率 · x%d", (int)f_mult];
-    // v19: slider 位置与 f_mult 对齐（拖动中不覆盖——isTracking）
-    if (!_multSlider.isTracking) {
-        _multSlider.value = (float)(f_mult - 1) / 9.0f;
-    }
+    [_multBtn setTitle:pm_multText() forState:UIControlStateNormal];
 }
 
 - (void)fg_close {
@@ -1231,7 +1211,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v24 pid=%d\n", getpid());
+        LOG("v25 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
