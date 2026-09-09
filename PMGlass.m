@@ -442,9 +442,23 @@ static void install_beat(void) {
         "            if not isZ and self.IsFieldNpc then isZ = self.IsFieldNpc(self) end\n"
         "            if s.god and not isZ then return end\n"
         "            -- onehit (standalone, priority): x1000 mild / 9e15 brutal\n"
+        "            -- v23: 服务器校验规避——校验关(BtCheckDmg)暴力档自动降为温和 x1000，\n"
+        "            -- 避免回放对不上弹'与服务器不一致'（9e15 必被校验，x1000 在容差内）\n"
         "            if s.onehit and isZ then\n"
-        "              if s.onehit == 1 then dmg = dmg * 1000\n"
-        "              elseif s.onehit == 2 then dmg = 9e15 end\n"
+        "              local checkDmg = rawget(_G, '__PM_CHECK__')\n"
+        "              if checkDmg == nil then\n"
+        "                local ed0 = rawget(_G, 'ed')\n"
+        "                local cfg = ed0 and ed0.BattleConfig\n"
+        "                local v = cfg and cfg.BtCheckDmg\n"
+        "                checkDmg = (v and v > 0) and 1 or 0\n"
+        "                rawset(_G, '__PM_CHECK__', checkDmg)\n"
+        "              end\n"
+        "              if s.onehit == 1 then\n"
+        "                dmg = dmg * 1000\n"
+        "              elseif s.onehit == 2 then\n"
+        "                if checkDmg == 1 then dmg = dmg * 1000\n"
+        "                else dmg = 9e15 end\n"   -- 校验关降温和(x1000)可通关；普通关照旧秒杀
+        "              end\n"
         "            -- mult (standalone slider, applies when onehit off): dmg * mult\n"
         "            elseif s.mult and s.mult > 1 then\n"
         "              dmg = dmg * s.mult\n"
@@ -1180,59 +1194,17 @@ extern const char* _dyld_get_image_name(uint32_t);
 
 // DYLD interposing：链接器把对本镜像内 _dyld_get_image_name 的外部调用重定向到包装
 
-// v22（两次闪退定案）：DYLD interposing 是【镜像级符号替换】，且连 dlsym 的解析
-// 都返回 interpose 后的地址——v20 直接调原函数死循环、v21 dlsym 缓存拿到的仍是
-// replacement 自身（日志铁证 real=0x105f6... 落在本模块 __TEXT）→ 递归未除根。
-// v22 釜底抽薪：ctor 里把【全部镜像名一次性拷贝】进自己的 char 数组缓存，
-// replacement 彻底纯内存查表——零符号调用、零原函数依赖、零递归可能。
-extern const struct mach_header* _dyld_get_image_header(uint32_t);
-
-#define PMG_MAX_IMAGES 1200
-static uint32_t g_my_ordinal = 0xFFFFFFFF;
-static const char* g_fake_name = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
-static char g_name_cache[PMG_MAX_IMAGES][PATH_MAX];   // ctor 里快照
-static uint32_t g_name_count = 0;
-static volatile int g_cache_ready = 0;
-
-static const char* _dyld_get_image_name_replacement(uint32_t idx) {
-    if (!g_cache_ready) return g_fake_name;                    // 缓存未就绪：安全兜底
-    if (idx == g_my_ordinal) return g_fake_name;               // 我们自己：伪装
-    if (idx < g_name_count && g_name_cache[idx][0]) return g_name_cache[idx];
-    return g_fake_name;                                         // 越界：兜底伪装
-}
-
-__attribute__((used)) static struct {
-    const void* replacement;
-    const void* replacee;
-} _pmg_interpose_dyld __attribute__((section("__DATA,__interpose"))) = {
-    (const void*)&_dyld_get_image_name_replacement,
-    (const void*)&_dyld_get_image_name
-};
-
-// ctor 早期调用：快照镜像名表 + mach_header 比对找自身 ordinal
-// ⚠️ 这里读镜像名用真实 _dyld_get_image_name——但 ctor 时它也会被 interpose 到 replacement！
-//    幸好 replacement 未就绪时返回 fake（安全），所以必须【先填缓存再置 ready】：
-//    但填缓存又需要真名……死锁？NO——从别的模块拿：dladdr 顺藤摸瓜不可行。
-//    正解：ctor 里对每个 i 用 dladdr(_dyld_get_image_header(i)) 拿 dli_fname——
-//    dladdr 走 dyld 内部结构，不经符号绑定，不受 interpose 影响！
-static void pmg_hide_init(void) {
-    Dl_info di;
-    // 自身 ordinal：header 指针比对
-    if (dladdr((void*)&pmg_hide_init, &di) && di.dli_fbase) {
-        for (uint32_t i = 0; i < _dyld_image_count() && i < PMG_MAX_IMAGES; i++) {
-            if (_dyld_get_image_header(i) == (const struct mach_header*)di.dli_fbase) {
-                g_my_ordinal = i;
-            }
-            // 镜像名快照：dladdr(header 指针) → dli_fname（不受 interpose 影响）
-            Dl_info idi;
-            if (dladdr((void*)_dyld_get_image_header(i), &idi) && idi.dli_fname) {
-                strlcpy(g_name_cache[i], idi.dli_fname, PATH_MAX);
-            }
-            g_name_count = i + 1;
-        }
-    }
-    g_cache_ready = 1;   // 快照完成，replacement 开始服务
-}
+// ════════════════════════════════════════════════════════════════════════
+// 防检测（v23 定案）：
+//   · dyld 镜像名 interpose 已【彻底移除】——v20 递归死循环 / v21 dlsym 污染 /
+//     v22 进程级破坏（动态加载的新镜像 ordinal 超出静态快照 → 系统库拿到假名 → 闪退）。
+//     教训：绝不能 interpose 高频进程级系统查询 API。
+//   · 保留的静态特征消隐：ObjC 类名（PMGCoreView/PMGPanelView）、沙盒文件名（sc_*）、
+//     日志名（sys_cache.log）、无特征 toast——足够应对客户端扫描式检测。
+//   · 服务器校验（弹窗"与服务器不一致"）是【服务器回放校验】，客户端无解药：
+//     服务器按原始战斗数据重算，秒杀 9e15 必对不上。规避 = 控制伤害在服务器容差内：
+//     BtCheckDmg 关卡用拉条温和倍率（x2~x10），非校验关随便秒。
+// ════════════════════════════════════════════════════════════════════════
 
 __attribute__((constructor)) static void fg_ctor() {
     @autoreleasepool {
@@ -1240,7 +1212,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v22 pid=%d\n", getpid());
+        LOG("v23 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
@@ -1250,9 +1222,6 @@ __attribute__((constructor)) static void fg_ctor() {
         }
         LOG("loaded in %s\n", bid.UTF8String);
 
-        // v21: 防检测初始化（ordinal + 原函数缓存）——必须在 worker 启动前
-        pmg_hide_init();
-        LOG("hide: ordinal=%u imgs=%u cache=1\n", (unsigned)g_my_ordinal, (unsigned)g_name_count);
 
         // v6：v45 原版 worker（pthread：探测→runloop桥→install→ping 自愈→flags 读）
         pthread_t t;
