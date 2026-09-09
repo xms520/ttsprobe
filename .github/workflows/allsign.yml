@@ -1,0 +1,46 @@
+name: build-allsign
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - "AllSign_Inject.m"
+      - ".github/workflows/allsign.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid || true
+
+      - name: Build AllSign_Inject dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 \
+            -dynamiclib \
+            -framework Foundation -framework UIKit -framework JavaScriptCore \
+            -o AllSign_Inject.dylib \
+            AllSign_Inject.m
+
+      - name: Fake-sign with ldid
+        run: ldid -S AllSign_Inject.dylib || true
+
+      - name: Show result
+        run: |
+          ls -la AllSign_Inject.dylib
+          file AllSign_Inject.dylib
+          md5 AllSign_Inject.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: allsign-dylib
+          path: AllSign_Inject.dylib
