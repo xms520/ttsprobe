@@ -457,6 +457,7 @@ static void install_beat(void) {
         "        rawset(_G, '__PM_PROBE3__', true)\n"
         "        local P3LOG = home .. '/Documents/sc_diag3.txt'\n"
         "        local p3seq = 0\n"
+        "        local p3cnt = {}   -- 每 tag 调用计数（热路径 cap，防日志刷爆）\n"
         "        local UNPACK = unpack\n"
         "        if type(UNPACK) ~= 'function' then UNPACK = rawget(table, 'unpack') end\n"
         "        local function p3shallow(v, d)\n"
@@ -489,14 +490,18 @@ static void install_beat(void) {
         "            local function wrap(...)\n"
         "              local a = {...}\n"
         "              p3seq = p3seq + 1\n"
-        "              p3append('=== ' .. tag .. '#' .. p3seq .. ' in(' .. #a .. ') ===\\n')\n"
-        "              for i = 1, #a do p3append('  a' .. i .. ' = ' .. p3shallow(a[i], 0) .. '\\n') end\n"
+        "              p3cnt[tag] = (p3cnt[tag] or 0) + 1\n"
+        "              local logit = p3cnt[tag] <= 200\n"
+        "              if p3cnt[tag] == 201 then p3append(tag .. ' : call cap 200 reached, further calls only counted\\n') end\n"
+        "              if logit then p3append('=== ' .. tag .. '#' .. p3seq .. ' in(' .. #a .. ') ===\\n')\n"
+        "                for i = 1, #a do p3append('  a' .. i .. ' = ' .. p3shallow(a[i], 0) .. '\\n') end\n"
+        "              end\n"
         "              local outs = {pcall(old, ...)}\n"
         "              if not outs[1] then\n"
-        "                p3append(tag .. ' ORIG-ERR: ' .. tostring(outs[2]) .. '\\n')\n"
+        "                if logit then p3append(tag .. ' ORIG-ERR: ' .. tostring(outs[2]) .. '\\n') end\n"
         "                error(outs[2], 0)\n"
         "              end\n"
-        "              p3append(tag .. ' out = ' .. p3shallow(outs[2], 0) .. ' nret=' .. (#outs - 1) .. '\\n===\\n')\n"
+        "              if logit then p3append(tag .. ' out = ' .. p3shallow(outs[2], 0) .. ' nret=' .. (#outs - 1) .. '\\n===\\n') end\n"
         "              return UNPACK(outs, 2, #outs)\n"
         "            end\n"
         "            return wrap\n"
@@ -551,6 +556,10 @@ static void install_beat(void) {
         "          p3wrapcm('BattleRecordNet', 'QueryBtRecord', 'query')\n"
         "          p3wrapcm('BattleRecordModel', 'GenBattleRecordData', 'genrec')\n"
         "          p3wrapcm('BattleRecordModel', 'GenBattleStat', 'genstat')\n"
+        "          p3wrapcm('BattleRecordModel', 'CacheBtRecord', 'cachebt')\n"
+        "          p3wrapcm('BattleRecordModel', 'GetCachedBtRecord', 'getcachedbt')\n"
+        "          p3wrapcm('BattleEndCheckSystem', 'OnUnitDie', 'ondie')\n"
+        "          p3wrapcm('BattleEndCheckSystem', 'EndBattle', 'endbattle')\n"
         "          p3wrapinst('BattleRecordController', 'net', 'ReportClientRawResult', 'report')\n"
         "          p3wrapinst('BattleRecordController', 'net', 'QueryBtRecord', 'query')\n"
         "          p3append('---- probe3 installed, normal play logs call shapes ----\\n')\n"
@@ -1325,7 +1334,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v28 pid=%d\n", getpid());
+        LOG("v29 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
