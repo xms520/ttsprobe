@@ -648,7 +648,6 @@ static BOOL fg_shouldSkip(NSString *bid) {
 #pragma mark - 状态渲染（C 状态 → 面板控件）
 
 static NSString *pm_godText(void)    { return f_godmode ? @"无敌 · 开" : @"无敌 · 关"; }
-}
 static NSString *pm_hitText(void) {
     return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关");
 }
