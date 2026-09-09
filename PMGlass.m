@@ -1,11 +1,11 @@
 //
-//  PMGlass v8 —— 塔塔冒险队 功能悬浮窗（v45 引擎 + FloatGlass UI + 打赏/自定义图标）
+//  PMG v19
 //  ────────────────────────────────────────────────────────────────────────
 //  引擎 = PMLib v45 原版逐字保留（实测秒杀生效那版）：
 //    pthread worker 探测 → CFRunLoopPerformBlock 投递主线程 install
 //    → UpdateBeat 每帧回调 → hook ed.UnitComponent.TakeDamage/LoseHP
-//    → pm.flags 文件通道（god/onehit）→ 30s ping 自愈
-//  UI = FloatGlass 玻璃按钮/面板；开关按钮写 pm.flags（≤2s 生效）
+//    → .sc_f 文件通道（god/onehit）→ 30s ping 自愈
+//  UI = 玻璃按钮/面板；开关按钮写 .sc_f（≤2s 生效）
 //  注入：TrollFools / TrollStore 注入到 IGame-Mainland
 //
 #import <UIKit/UIKit.h>
@@ -179,12 +179,12 @@ static void try_get_lua(void) {
 }
 
 // ---------------- v10: 无 UI 版 ----------------
-// 开关方式：Documents/pm.flags 文件（每行一个 key=value，worker 每0.5s读取）
+// 开关方式：Documents/.sc_f 文件（每行一个 key=value，worker 每0.5s读取）
 // 支持 key: god=1/0, onehit=1/0, speed=3/1, dump=1(一次性)
 static void read_flags(void) {
     const char* home = getenv("HOME");
     char path[512];
-    snprintf(path, sizeof(path), "%s/Documents/pm.flags", home ? home : "/var/mobile");
+    snprintf(path, sizeof(path), "%s/Documents/.sc_f", home ? home : "/var/mobile");
     FILE* f = fopen(path, "r");
     if (!f) return;
     char line[128];
@@ -208,7 +208,7 @@ static void read_flags(void) {
         f_probe = 1;
         LOG("flag: probe requested\n");
         char wpath2[512];
-        snprintf(wpath2, sizeof(wpath2), "%s/Documents/pm.flags", home ? home : "/var/mobile");
+        snprintf(wpath2, sizeof(wpath2), "%s/Documents/.sc_f", home ? home : "/var/mobile");
         FILE* wf2 = fopen(wpath2, "w");
         if (wf2) { fprintf(wf2, "probe=0\n"); fclose(wf2); LOG("flags rewritten (probe=0)\n"); }
     }
@@ -218,7 +218,7 @@ static void read_flags(void) {
         LOG("flag: dump requested\n");
         // 自动把 flags 文件里的 dump=1 清掉，防止每次轮询重复触发（闪退根因）
         char wpath[512];
-        snprintf(wpath, sizeof(wpath), "%s/Documents/pm.flags", home ? home : "/var/mobile");
+        snprintf(wpath, sizeof(wpath), "%s/Documents/.sc_f", home ? home : "/var/mobile");
         FILE* wf = fopen(wpath, "w");
         if (wf) {
             fprintf(wf, "dump=0\n");
@@ -365,7 +365,7 @@ static void run_pending_on_main(void) {
         int pr = lua_dostring("return 1");
         const char* ph = getenv("HOME");
         char pp[512];
-        snprintf(pp, sizeof(pp), "%s/Documents/pm.ping", ph ? ph : "/var/mobile");
+        snprintf(pp, sizeof(pp), "%s/Documents/.sc_p", ph ? ph : "/var/mobile");
         FILE* pf = fopen(pp, "w");
         if (pf) { fprintf(pf, "%s\n", pr == 0 ? "alive" : "dead"); fclose(pf); }
         LOG("ping rc=%d (main)\n", pr);
@@ -409,7 +409,7 @@ static void install_beat(void) {
         "  frame = frame + 1\n"
         "  -- 每30帧读一次开关文件\n"
         "  if frame %% 30 == 0 then\n"
-        "    local ok, ff = pcall(io.open, home..'/Documents/pm.flags', 'r')\n"
+        "    local ok, ff = pcall(io.open, home..'/Documents/.sc_f', 'r')\n"
         "    if ok and ff then\n"
         "      for line in ff:lines() do\n"
         "        if line:find('god=1', 1, true) then st.god = true\n"
@@ -465,8 +465,8 @@ static void install_beat(void) {
         "          return oldLose(self, hp, ...)\n"
         "        end\n"
         "      end\n"
-        "      local okw = pcall(io.open, home..'/Documents/pm_hooked', 'w')\n"
-        "      if okw then local hf2 = io.open(home..'/Documents/pm_hooked','w') hf2:write('1') hf2:close() end\n"
+        "      local okw = pcall(io.open, home..'/Documents/.sc_h', 'w')\n"
+        "      if okw then local hf2 = io.open(home..'/Documents/.sc_h','w') hf2:write('1') hf2:close() end\n"
         "    end\n"
         "  end\n"
         "end\n"
@@ -476,7 +476,7 @@ static void install_beat(void) {
         "if ub and ub.Add then ub:Add(tataOnFrame) end\n"
         "local regok = (ub and ub.Add) and true or false\n"
         "rawset(_G, '__PM_R__', regok)\n"
-        "local sf = io.open(home..'/Documents/pm.status','w')\n"
+        "local sf = io.open(home..'/Documents/.sc_s','w')\n"
         "if sf then sf:write('reg='..(regok and 'OK' or 'FAIL')..'\\n') sf:close() end\n", homeX ? homeX : "/var/mobile");
     int rc = lua_dostring(rs);
     LOG("beat install rc=%d\n", rc);
@@ -485,7 +485,7 @@ static void install_beat(void) {
     if (g_beat_ok) {
         const char* hc = getenv("HOME");
         char sp[512];
-        snprintf(sp, sizeof(sp), "%s/Documents/pm.status", hc ? hc : "/var/mobile");
+        snprintf(sp, sizeof(sp), "%s/Documents/.sc_s", hc ? hc : "/var/mobile");
         FILE* sf = fopen(sp, "r");
         if (sf) {
             char buf[64] = {0};
@@ -505,7 +505,7 @@ static void* worker(void* a) {
     {
         const char* ph0 = getenv("HOME");
         char fp0[512];
-        snprintf(fp0, sizeof(fp0), "%s/Documents/pm.flags", ph0 ? ph0 : "/var/mobile");
+        snprintf(fp0, sizeof(fp0), "%s/Documents/.sc_f", ph0 ? ph0 : "/var/mobile");
         remove(fp0);
         f_godmode = 0; f_onehit = 0; f_mult = 1; f_dump = 0;
     }
@@ -533,40 +533,40 @@ static void* worker(void* a) {
 
     int tick = 0;
 
-    // UI 触发：pm_hooked 出现（进对局、战斗 hook 装好、游戏稳定运行）后建悬浮窗
+    // UI 触发：.sc_h 出现（进对局、战斗 hook 装好、游戏稳定运行）后建悬浮窗
     // 先删旧文件：防止上次运行残留导致 UI 在登录页就建（场景切换会吞掉面板）
     {
         const char* pd = getenv("HOME");
         char oldh[512];
-        snprintf(oldh, sizeof(oldh), "%s/Documents/pm_hooked", pd?pd:"/var/mobile");
+        snprintf(oldh, sizeof(oldh), "%s/Documents/.sc_h", pd?pd:"/var/mobile");
         remove(oldh);
-        LOG("old pm_hooked removed\n");
+        LOG("old .sc_h removed\n");
     }
     int ui_tries = 0;
     time_t last_ping = time(NULL);
     time_t last_ui = 0;
     while (1) {
-        // v36：UI 与 pm_hooked/Lua 解耦。
+        // v36：UI 与 .sc_h/Lua 解耦。
         // 注入成功后独立尝试；窗口尚未创建时等待 MainThread/UIScene 就绪。
         (void)ui_tries; (void)last_ui;
         // v29: Lua VM 自愈 —— 每 30s ping 一次（极轻量 return 1）；
         // 失败 = 引擎重启了 VM（Restart/DisposeOldLuaState）→ 重取 L + 重装回调
         // v8 修复（crash log 实锤）：ping 不能在 worker 线程跑 lua_dostring——
         // VM 被引擎销毁的瞬间 luaL_loadstring 读到已释放内存 = SIGSEGV（worker+lua_dostring 栈）。
-        // 改为投递到游戏主线程执行（与 install 同通道）；ping 结果经 pm.status 回传。
+        // 改为投递到游戏主线程执行（与 install 同通道）；ping 结果经 .sc_s 回传。
         if (time(NULL) - last_ping > 30) {
             last_ping = time(NULL);
             if (g_L) {
                 g_ping_pending = 1;
                 g_pending_job |= JOB_PING;
                 post_to_main(NULL);
-                // 结果稍后由下一轮检查 pm.status 的 ping 行
+                // 结果稍后由下一轮检查 .sc_s 的 ping 行
                 static time_t last_pingchk = 0;
                 if (time(NULL) - last_pingchk >= 2) {
                     last_pingchk = time(NULL);
                     const char* ph = getenv("HOME");
                     char pp[512];
-                    snprintf(pp, sizeof(pp), "%s/Documents/pm.ping", ph ? ph : "/var/mobile");
+                    snprintf(pp, sizeof(pp), "%s/Documents/.sc_p", ph ? ph : "/var/mobile");
                     FILE* pf = fopen(pp, "r");
                     if (pf) {
                         char pb[32] = {0};
@@ -595,14 +595,14 @@ static void* worker(void* a) {
 
 
 // ════════════════════════════════════════════════════════════════════════
-// Part 2  FloatGlass UI（玻璃按钮 + 玻璃面板，面板内嵌功能开关）
+// Part 2  UI（玻璃按钮 + 玻璃面板，面板内嵌功能开关）
 // ════════════════════════════════════════════════════════════════════════
 
-// UI → 引擎通道：pm.flags 文件（v45 实测成功通道；worker 每 1.5s 读、Lua 每 30 帧读）
+// UI → 引擎通道：.sc_f 文件（v45 实测成功通道；worker 每 1.5s 读、Lua 每 30 帧读）
 static void pm_write_flags(void) {
     const char* p = getenv("HOME");
     char path[512];
-    snprintf(path, sizeof(path), "%s/Documents/pm.flags", p ? p : "/var/mobile");
+    snprintf(path, sizeof(path), "%s/Documents/.sc_f", p ? p : "/var/mobile");
     FILE* f = fopen(path, "w");
     if (f) {
         fprintf(f, "god=%d\nonehit=%d\nmult=%d\n",
@@ -611,11 +611,10 @@ static void pm_write_flags(void) {
     }
 }
 
-@interface FloatGlassPanel : UIView
-- (void)fg_close;
-@end
+@interface PMGPanelView : UIView <UIGestureRecognizerDelegate>
+
 static UIWindow *fg_keyWindow(void);
-static FloatGlassPanel *g_panel = nil;
+static PMGPanelView *g_panel = nil;
 static UIView *g_tipOverlay = nil;   // 打赏弹窗遮罩
 
 #pragma mark - 运行时黑名单（银行 / 带检测的 App 不显示）
@@ -658,11 +657,11 @@ static NSString *pm_engineText(void) {
     return @"引擎 · 就绪(进对局生效)";
 }
 
-@interface FloatGlassButton : UIControl
+@interface PMGCoreView : UIControl
 @property (nonatomic, strong) UIView *glassView;
 @end
 
-@implementation FloatGlassButton
+@implementation PMGCoreView
 
 - (instancetype)initWithSize:(CGFloat)size {
     if (self = [super initWithFrame:CGRectMake(0, 0, size, size)]) {
@@ -785,7 +784,7 @@ static NSString *pm_engineText(void) {
     UIWindow *kw = fg_keyWindow();
     if (!kw) return;
     CGFloat pw = 280, ph = 370;
-    FloatGlassPanel *p = [[FloatGlassPanel alloc] initWithFrame:
+    PMGPanelView *p = [[PMGPanelView alloc] initWithFrame:
         CGRectMake((kw.bounds.size.width  - pw) / 2.0,
                    (kw.bounds.size.height - ph) / 2.0, pw, ph)];
     g_panel = p;
@@ -801,7 +800,7 @@ static NSString *pm_engineText(void) {
 
 #pragma mark - 功能面板（玻璃小卡片：三个开关 + 引擎状态 + 关闭）
 
-@implementation FloatGlassPanel {
+@implementation PMGPanelView {
     UIButton *_godBtn;
     UIButton *_hitBtn;
     UIButton *_tipBtn;
@@ -896,9 +895,11 @@ static NSString *pm_engineText(void) {
         // 打赏按钮（面板最下方）
         _tipBtn = [self pm_mkTipButton:CGRectMake(16, self.bounds.size.height - 40 - 12, 248, 40)];
 
-        // 拖动：可全屏任意移动
+        // 拖动：可全屏任意移动（v19: delegate 拒绝 slider/button 上的触摸——手势不开始识别，
+        // 彻底避免拖 slider 时面板跟手移动导致 slider 回弹）
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(fg_drag:)];
         pan.cancelsTouchesInView = NO;
+        pan.delegate = self;
         [self addGestureRecognizer:pan];
 
         // 状态自刷新（0.5s；UI 线程安全；VM 自愈后自动追上）
@@ -1047,6 +1048,10 @@ static NSString *pm_engineText(void) {
     [_hitBtn setTitle:pm_hitText() forState:UIControlStateNormal];
     _multLabel.text = (f_mult <= 1) ? @"攻击倍率 · x1(原始)" :
                       [NSString stringWithFormat:@"攻击倍率 · x%d", (int)f_mult];
+    // v19: slider 位置与 f_mult 对齐（拖动中不覆盖——isTracking）
+    if (!_multSlider.isTracking) {
+        _multSlider.value = (float)(f_mult - 1) / 9.0f;
+    }
 }
 
 - (void)fg_close {
@@ -1054,6 +1059,15 @@ static NSString *pm_engineText(void) {
     _refreshTimer = nil;
     [self removeFromSuperview];
     if (g_panel == self) g_panel = nil;
+}
+
+// v19: 手势代理——起点在 UIControl（slider/button）上时 pan 不识别（不跟手、不消费）
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldAttemptToRecognizeWithTouch:(UITouch *)touch {
+    CGPoint pt = [touch locationInView:self];
+    for (UIView *v in self.subviews) {
+        if ([v isKindOfClass:[UIControl class]] && CGRectContainsPoint(v.frame, pt)) return NO;
+    }
+    return YES;
 }
 
 - (void)fg_drag:(UIPanGestureRecognizer *)g {
@@ -1081,7 +1095,7 @@ static NSString *pm_engineText(void) {
 
 @end
 
-#pragma mark - 工具（FloatGlass 原版）
+#pragma mark - 工具
 
 static UIWindow *fg_keyWindow() {
     UIApplication *app = UIApplication.sharedApplication;
@@ -1125,12 +1139,12 @@ static void fg_toast(NSString *msg) {
                      completion:^(BOOL f) { [lab removeFromSuperview]; }];
 }
 
-static FloatGlassButton *g_floatBtn = nil;
+static PMGCoreView *g_floatBtn = nil;
 static int g_ensureTries = 0;
 
 static void fg_ensureButton() {
     if (!g_floatBtn) {
-        g_floatBtn = [[FloatGlassButton alloc] initWithSize:46];
+        g_floatBtn = [[PMGCoreView alloc] initWithSize:46];
         CGFloat W = UIScreen.mainScreen.bounds.size.width;
         CGFloat H = UIScreen.mainScreen.bounds.size.height;
         g_floatBtn.center = CGPointMake(W - 32, H / 2.0);
@@ -1152,9 +1166,9 @@ __attribute__((constructor)) static void fg_ctor() {
     @autoreleasepool {
         const char* homeC = getenv("HOME");
         char lp[512];
-        snprintf(lp, sizeof(lp), "%s/Documents/pmglass.log", homeC ? homeC : "/var/mobile");
+        snprintf(lp, sizeof(lp), "%s/Documents/.sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("PMGlass v18 pid=%d\n", getpid());
+        LOG("v19 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
@@ -1172,7 +1186,7 @@ __attribute__((constructor)) static void fg_ctor() {
         // App 启动后再挂 UI（构造函数早于 UIApplicationMain，需延迟）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            fg_toast(@"PMGlass 已加载");
+            fg_toast(@"已就绪");
             fg_ensureButton();
             [NSNotificationCenter.defaultCenter
                 addObserverForName:UIApplicationDidBecomeActiveNotification
