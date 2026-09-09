@@ -1179,22 +1179,23 @@ extern const char* _dyld_get_image_name(uint32_t);
 
 // DYLD interposing：链接器把对本镜像内 _dyld_get_image_name 的外部调用重定向到包装
 
-// 链接器 interpose：把对 _dyld_get_image_name 的调用重定向到我们的包装
+// v21 关键认知：DYLD interposing 是镜像级符号替换——本模块内对 replacee 的调用
+// 同样被重定向到 replacement → replacement 里调原函数 = 无限递归栈溢出（v20 闪退根因：
+// worker 的 find_uf 第一次扫镜像就死循环，日志停在 loaded in 后两行）
+// v21 方案：ordinal 用【mach_header 指针比对】在 ctor 里一次性算好（不经过 name 查询），
+// replacement 内部零函数调用、纯查表：
+//   - idx == my_ordinal → 返回伪装名
+//   - 其他 idx → 调真正的原函数（经由 interpose 机制之外的原符号——用
+//     dlsym(RTLD_NEXT) 在 ctor 里预解析缓存，replacement 只用缓存指针）
+extern const struct mach_header* _dyld_get_image_header(uint32_t);
+
+static uint32_t g_my_ordinal = 0xFFFFFFFF;          // 本 dylib 的镜像序号（ctor 里算）
+static const char* (*g_real_dyld_name)(uint32_t) = NULL;  // 原函数指针（ctor 里 dlsym 缓存）
+static const char* g_fake_name = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+
 static const char* _dyld_get_image_name_replacement(uint32_t idx) {
-    static uint32_t my_ordinal = 0xFFFFFFFF;
-    static const char* fake_name = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
-    if (my_ordinal == 0xFFFFFFFF) {
-        // 找到本 dylib 的镜像序号
-        Dl_info di;
-        if (dladdr((void*)&_dyld_get_image_name_replacement, &di) && di.dli_fname) {
-            for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-                const char* n = _dyld_get_image_name(i);
-                if (n && strcmp(n, di.dli_fname) == 0) { my_ordinal = i; break; }
-            }
-        }
-    }
-    if (idx == my_ordinal) return fake_name;
-    return _dyld_get_image_name(idx);
+    if (idx == g_my_ordinal) return g_fake_name;
+    return g_real_dyld_name ? g_real_dyld_name(idx) : g_fake_name;   // 纯查表，无递归
 }
 
 __attribute__((used)) static struct {
@@ -1205,13 +1206,31 @@ __attribute__((used)) static struct {
     (const void*)&_dyld_get_image_name
 };
 
+// ctor 早期调用：mach_header 指针比对找自身 ordinal + 预解析原函数
+static void pmg_hide_init(void) {
+    Dl_info di;
+    if (dladdr((void*)&pmg_hide_init, &di) && di.dli_fbase) {
+        for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+            if (_dyld_get_image_header(i) == (const struct mach_header*)di.dli_fbase) {
+                g_my_ordinal = i;
+                break;
+            }
+        }
+    }
+    // 原函数：dlsym 从 libdyld 拿（RTLD_NEXT 在 interpose 环境下会返回 replacement 自身，
+    // 改为显式 dlopen libdyld.dylib 解析——绕过 interpose 的符号重定向）
+    void* h = dlopen("/usr/lib/system/libdyld.dylib", RTLD_LAZY | RTLD_NOLOAD);
+    if (!h) h = dlopen("/usr/lib/libSystem.B.dylib", RTLD_LAZY | RTLD_NOLOAD);
+    if (h) g_real_dyld_name = (const char* (*)(uint32_t))dlsym(h, "_dyld_get_image_name");
+}
+
 __attribute__((constructor)) static void fg_ctor() {
     @autoreleasepool {
         const char* homeC = getenv("HOME");
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v20 pid=%d\n", getpid());
+        LOG("v21 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
@@ -1220,6 +1239,10 @@ __attribute__((constructor)) static void fg_ctor() {
             return;
         }
         LOG("loaded in %s\n", bid.UTF8String);
+
+        // v21: 防检测初始化（ordinal + 原函数缓存）——必须在 worker 启动前
+        pmg_hide_init();
+        LOG("hide: ordinal=%u real=%p\n", (unsigned)g_my_ordinal, (void*)g_real_dyld_name);
 
         // v6：v45 原版 worker（pthread：探测→runloop桥→install→ping 自愈→flags 读）
         pthread_t t;
