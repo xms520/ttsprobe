@@ -53,6 +53,7 @@ static lua_State* g_L = NULL;
 
 static volatile int f_godmode = 0, f_onehit = 0, f_dump = 0;   // onehit: 0=关 1=温和x1000 2=暴力（纯三态）
 static volatile int f_mult = 1;   // 攻击倍率独立状态：1..10（1=原始伤害）；与秒杀完全解耦
+static volatile int f_forge = 0;   // v32 日志伪造 0=关 1=录 2=换
 static volatile int f_probe = 0;
 static int g_dump_done = 0, g_probe_done = 0;  // 一次性动作防重入
 static FILE* g_log = NULL;
@@ -404,7 +405,7 @@ static void install_beat(void) {
     char rs[12288];
     int n_w = snprintf(rs, sizeof(rs),
         // 主回调：状态轮询 + hook 安装，全部游戏主线程执行
-        "rawset(_G, '__PM_S__', {god=false, onehit=false, mult=1})\n"
+        "rawset(_G, '__PM_S__', {god=false, onehit=false, mult=1, forge=0, forgeArmed=false})\n"
         "local home = '%s'\n"
         "local st = rawget(_G, '__PM_S__')\n"
         "local frame = 0\n"
@@ -421,6 +422,7 @@ static void install_beat(void) {
         "        elseif line:find('^onehit=1$', 1, false) then st.onehit = 1\n"
         "        elseif line:find('^onehit=0$', 1, false) then st.onehit = false\n"
         "        elseif line:find('^mult=', 1, false) then st.mult = tonumber(line:sub(6)) or st.mult\n"
+        "        elseif line:find('^forge=', 1, false) then local nf = tonumber(line:sub(8)) or 0; if nf ~= (st.forge or 0) then st.forgeArmed = (nf ~= 0); end; st.forge = nf\n"
                                 
                 "        end\n"
         "      end\n"
@@ -452,7 +454,78 @@ static void install_beat(void) {
         "        end\n"
         "      end\n"
         
-                        "      rawset(_G, '__PM_H__', true)\n"
+                                "      -- v32 日志伪造层：录(capture)已接受局日志 / 换(swap)结算上报调包\n"
+        "      -- 触发=按钮置 录/换 后，下一局结算那一次 CompressBattleLog 生效（边沿触发一次性）\n"
+        "      if not rawget(_G, '__PM_FORGE__') then\n"
+        "        rawset(_G, '__PM_FORGE__', true)\n"
+        "        local TPLF = home .. '/Documents/sc_tpl.log'\n"
+        "        local FLOGF = home .. '/Documents/sc_forge.txt'\n"
+        "        local function flog(s)\n"
+        "          local okf, lf = pcall(io.open, FLOGF, 'a')\n"
+        "          if okf and lf then\n"
+        "            local ok, stamp = pcall(function() return (os and os.date) and (os.date('%%H:%%M:%%S ') or '') end)\n"
+        "            lf:write((ok and stamp or '') .. tostring(s) .. '\\n')\n"
+        "            lf:close()\n"
+        "          end\n"
+        "        end\n"
+        "        local function load_tpl()\n"
+        "          local okf, tf = pcall(io.open, TPLF, 'r')\n"
+        "          if not (okf and tf) then return nil end\n"
+        "          local okc, data = pcall(tf.read, tf, '*a')\n"
+        "          pcall(tf.close, tf)\n"
+        "          if not okc or type(data) ~= 'string' or #data < 500 or #data > 4000000 then return nil end\n"
+        "          if not data:match('^ri%%d') then return nil end\n"
+        "          local h1, h2 = data:match('^([^\\n]*)\\n([^\\n]*)\\n')\n"
+        "          if not h1 or not h2 then return nil end\n"
+        "          return data:sub(#h1 + #h2 + 3)\n"
+        "        end\n"
+        "        __PM_TPL_BODY__ = load_tpl()\n"
+        "        flog('forge up, tpl=' .. (__PM_TPL_BODY__ and ('ok ' .. #__PM_TPL_BODY__) or 'none'))\n"
+        "        local oldC = rawget(ed, 'CompressBattleLog')\n"
+        "        if type(oldC) == 'function' then\n"
+        "          local wok, werr = pcall(rawset, ed, 'CompressBattleLog', function(raw)\n"
+        "            local out = raw\n"
+        "            local s = rawget(_G, '__PM_S__')\n"
+        "            local mode = s and tonumber(s.forge) or 0\n"
+        "            if s and s.forgeArmed and type(raw) == 'string' and #raw > 500 then\n"
+        "              if mode == 1 then\n"
+        "                s.forgeArmed = false\n"
+        "                local okf, h = pcall(io.open, TPLF, 'w')\n"
+        "                if okf and h then\n"
+        "                  pcall(h.write, h, raw)\n"
+        "                  pcall(h.close, h)\n"
+        "                  __PM_TPL_BODY__ = load_tpl()\n"
+        "                  flog('CAP saved ' .. #raw .. ' bytes tpl=' .. (__PM_TPL_BODY__ and #__PM_TPL_BODY__ or 'FAIL'))\n"
+        "                else\n"
+        "                  flog('CAP open FAIL')\n"
+        "                end\n"
+        "              elseif mode == 2 then\n"
+        "                s.forgeArmed = false\n"
+        "                if __PM_TPL_BODY__ then\n"
+        "                  local h1, h2 = raw:match('^([^\\n]*)\\n([^\\n]*)\\n')\n"
+        "                  if h1 and h2 then\n"
+        "                    out = h1 .. '\\n' .. h2 .. '\\n' .. __PM_TPL_BODY__\n"
+        "                    local ws = io.open(home .. '/Documents/sc_sent.log', 'w')\n"
+        "                    if ws then ws:write(out) ws:close() end\n"
+        "                    local wa = io.open(home .. '/Documents/sc_actual.log', 'w')\n"
+        "                    if wa then wa:write(raw) wa:close() end\n"
+        "                    flog('SWAP sent ' .. #out .. ' (actual ' .. #raw .. ')')\n"
+        "                  else\n"
+        "                    flog('SWAP skip: header parse fail')\n"
+        "                  end\n"
+        "                else\n"
+        "                  flog('SWAP skip: no template')\n"
+        "                end\n"
+        "              end\n"
+        "            end\n"
+        "            return oldC(out)\n"
+        "          end)\n"
+        "          flog('wrap CompressBattleLog ' .. (wok and 'ok' or ('ERR ' .. tostring(werr))))\n"
+        "        else\n"
+        "          flog('CompressBattleLog missing (' .. type(oldC) .. ')')\n"
+        "        end\n"
+        "      end\n"
+"      rawset(_G, '__PM_H__', true)\n"
                 "      local oldTD = UC.TakeDamage\n"
         "      if oldTD then\n"
         "        UC.TakeDamage = function(self, dmg, ...)\n"
@@ -548,7 +621,7 @@ static void* worker(void* a) {
         char fp0[512];
         snprintf(fp0, sizeof(fp0), "%s/Documents/sc_f", ph0 ? ph0 : "/var/mobile");
         remove(fp0);
-        f_godmode = 0; f_onehit = 0; f_mult = 1; f_dump = 0;
+        f_godmode = 0; f_onehit = 0; f_mult = 1; f_dump = 0; f_forge = 0;
     }
     int hb = 0;
     for (int i = 0; i < 1440; i++) {
@@ -646,8 +719,8 @@ static void pm_write_flags(void) {
     snprintf(path, sizeof(path), "%s/Documents/sc_f", p ? p : "/var/mobile");
     FILE* f = fopen(path, "w");
     if (f) {
-        fprintf(f, "god=%d\nonehit=%d\nmult=%d\n",
-                (int)f_godmode, (int)f_onehit, (int)f_mult);
+        fprintf(f, "god=%d\nonehit=%d\nmult=%d\nforge=%d\n",
+                (int)f_godmode, (int)f_onehit, (int)f_mult, (int)f_forge);
         fclose(f);
     }
 }
@@ -692,6 +765,11 @@ static NSString *pm_godText(void)    { return f_godmode ? @"无敌 · 开" : @"�
 static NSString *pm_multText(void) {
     return (f_mult <= 1) ? @"攻击倍率 · x1" :
            [NSString stringWithFormat:@"攻击倍率 · x%d", (int)f_mult];
+}
+static NSString *pm_forgeText(void) {
+    if (f_forge == 1) return @"日志伪造 · 录制（下局结算触发）";
+    if (f_forge == 2) return @"日志伪造 · 调包 ⚠（下局结算触发）";
+    return @"日志伪造 · 关";
 }
 static NSString *pm_hitText(void) {
     return f_onehit == 2 ? @"秒杀 · 暴力" : (f_onehit == 1 ? @"秒杀 · 温和" : @"秒杀 · 关");
@@ -829,7 +907,7 @@ static NSString *pm_engineText(void) {
     if (g_panel) { [self fg_closePanel]; return; }
     UIWindow *kw = fg_keyWindow();
     if (!kw) return;
-    CGFloat pw = 280, ph = 370;
+    CGFloat pw = 280, ph = 406;
     PMGPanelView *p = [[PMGPanelView alloc] initWithFrame:
         CGRectMake((kw.bounds.size.width  - pw) / 2.0,
                    (kw.bounds.size.height - ph) / 2.0, pw, ph)];
@@ -853,6 +931,7 @@ static NSString *pm_engineText(void) {
     UILabel  *_engLabel;
     NSTimer  *_refreshTimer;
     UIButton *_multBtn;         // 攻击倍率按钮（x1..x10 循环，v25 拉条改按钮）
+    UIButton *_forgeBtn;        // v32 日志伪造：关/录/换
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -903,9 +982,10 @@ static NSString *pm_engineText(void) {
         // 攻击倍率拉条（x1 ~ x10）
         // 攻击倍率按钮（x1..x10 循环点击；v25: 拉条改按钮）
         _multBtn = [self pm_mkSwitch:CGRectMake(16, 146, 248, 40) title:pm_multText() action:@selector(pm_multTap:)];
+        _forgeBtn = [self pm_mkSwitch:CGRectMake(16, 190, 248, 36) title:pm_forgeText() action:@selector(pm_forgeTap:)];
 
         // 引擎状态行
-        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 206, 248, 24)];
+        _engLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 232, 248, 24)];
         _engLabel.text = pm_engineText();
         _engLabel.textAlignment = NSTextAlignmentCenter;
         _engLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
@@ -1055,6 +1135,14 @@ static NSString *pm_engineText(void) {
 }
 
 // 攻击倍率按钮：x1 → x2 → ... → x10 → x1 循环（与秒杀独立；秒杀开时校验关下叠加）
+// v32 伪造按钮：关 → 录 → 换 → 关（Lua 侧边沿触发，每种模式只在下一次结算生效一次）
+- (void)pm_forgeTap:(id)sender {
+    (void)sender;
+    f_forge = (f_forge + 1) % 3;
+    pm_write_flags();
+    [_forgeBtn setTitle:pm_forgeText() forState:UIControlStateNormal];
+    LOG("ui: forge=%d\n", (int)f_forge);
+}
 - (void)pm_multTap:(id)sender {
     (void)sender;
     f_mult = (f_mult >= 10) ? 1 : (f_mult + 1);
@@ -1219,7 +1307,7 @@ __attribute__((constructor)) static void fg_ctor() {
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v31 pid=%d\n", getpid());
+        LOG("v32 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
         if (!bid) { LOG("no bundle id\n"); return; }
