@@ -612,6 +612,7 @@ static void pm_write_flags(void) {
 }
 
 @interface PMGPanelView : UIView <UIGestureRecognizerDelegate>
+@end
 
 static UIWindow *fg_keyWindow(void);
 static PMGPanelView *g_panel = nil;
