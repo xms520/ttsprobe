@@ -457,7 +457,7 @@ static void install_beat(void) {
         "                dmg = dmg * 1000\n"
         "              elseif s.onehit == 2 then\n"
         "                if checkDmg == 1 then dmg = dmg * 1000\n"
-        "                else dmg = 9e15 end\n"   -- 校验关降温和(x1000)可通关；普通关照旧秒杀
+        "                else dmg = 9e15 end\n"  // 校验关降温和(x1000)可通关；普通关照旧秒杀
         "              end\n"
         "            -- mult (standalone slider, applies when onehit off): dmg * mult\n"
         "            elseif s.mult and s.mult > 1 then\n"
