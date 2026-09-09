@@ -472,8 +472,8 @@ static void install_beat(void) {
         "              if s.onehit == 1 then\n"
         "                dmg = dmg * 1000\n"
         "              elseif s.onehit == 2 then\n"
-        "                if checking then dmg = dmg * 2\n"   -- 校验关：x2（服务器容差内）
-        "                else dmg = 9e15 end\n"  -- 普通关：真秒杀
+        "                if checking then dmg = dmg * 2\n"  // 校验关：x2（服务器容差内）
+        "                else dmg = 9e15 end\n"  // 普通关：真秒杀
         "              end\n"
         "              -- v25: 秒杀开着时倍率也叠加（秒杀温和档 x1000 * mult）\n"
         "              if s.mult and s.mult > 1 and checking then dmg = dmg * s.mult end\n"
