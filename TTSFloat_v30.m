@@ -73,9 +73,9 @@ static NSString *TTSEndpoint(void) {
 #define QW_HOST_A @"a7a2b0abb0a0ac"        /* dashsco   XOR 0xC3 */
 #define QW_HOST_B @"b3a6eda2afaaba"        /* pe.aliy   XOR 0xC3 */
 #define QW_HOST_C @"b6ada0b0eda0acae"      /* uncs.com  XOR 0xC3 */
-#define QW_KEY_A_HEX @"PLACEHOLDER_KEY_A"   /* DashScope API key 三段密文——编译前必须替换！ */
-#define QW_KEY_B_HEX @"PLACEHOLDER_KEY_B"
-#define QW_KEY_C_HEX @"PLACEHOLDER_KEY_C"
+#define QW_KEY_A_HEX @"4f57114b4f1174126c7864706c6474120e457a70127179657f756d78524e4f71634a5772784644"
+#define QW_KEY_B_HEX @"0b05634f6c5e6c0e70597a580a44744d5b556572046b5679580e0e704d0d0b6d75547d770c697a"
+#define QW_KEY_C_HEX @"787f515209784554685f08576f567b6b68530e5d6a52490b78087a0d5e724c74704c515d71700b"
 static NSString *const kQwenVoiceKey     = @"TTSFloatQwenVoice";      /* 千问音色ID持久化 */
 static NSString *const kBackendKey       = @"TTSFloatBackend";        /* 0=原接口 1=千问 */
 static NSString *const kQwenRateKey      = @"TTSFloatQwenRate";       /* 语速 0.5~2.0 */
@@ -83,7 +83,15 @@ static NSString *const kQwenInstrKey     = @"TTSFloatQwenInstr";      /* 语气�
 static NSInteger g_backend = 0;              /* 0=原接口(tiax) 1=千问直连 */
 static NSString *g_qwenVoice = @"Cherry";    /* 千问音色 ID（英文标识） */
 static float g_qwenRate = 1.0f;              /* 语速 */
-static NSString *g_qwenInstr = nil;          /* 语气指令（可空） */
+static NSString *g_qwenInstr = nil;          /* 语气情绪显示名（可空，下发时转换指令） */
+
+/* v30.1: 情绪预设表（显示名，索引对齐） */
+static NSString *const g_qwEmoNames[] = {
+    @"默认", @"生气", @"愤怒", @"快乐", @"开心", @"兴奋", @"悲伤",
+    @"难过", @"恐惧", @"害怕", @"惊讶", @"温柔", @"严肃", @"沉稳",
+    @"激动", @"委屈", @"撒娇", @"嘲讽", @"耳语", @"大喊",
+};
+#define QW_EMO_COUNT (sizeof(g_qwEmoNames) / sizeof(g_qwEmoNames[0]))
 
 static NSInteger g_targetSampleRate = 16000;
 
@@ -1399,8 +1407,8 @@ static UIImage *TTSLoadBallImage(void) {
 - (void)showVoiceList;
 - (void)reloadVoices;
 - (void)qwRateChanged:(UISlider *)s;      /* v30: 语速滑杆 */
-- (void)qwInstrChanged:(UITextField *)f;  /* v30: 语气指令输入 */
-- (void)qwInstrDone:(UITextField *)f;      /* v30: 语气指令按回车收起 */
+- (void)qwEmoTapped:(UIButton *)b;        /* v30.1: 情绪标签点选 */
+- (NSString *)qwEmoDisplayForIdx:(NSUInteger)idx;   /* v30.1: 索引→显示名 */
 - (void)closeVoiceList;
 - (void)maskTapped:(UITapGestureRecognizer *)g;
 - (void)closePanel;
@@ -1571,7 +1579,7 @@ static UIImage *TTSLoadBallImage(void) {
     /* 音色异步加载完成后刷新标题（v30: 千问后端直接显示，不等原接口） */
     if (g_backend == 1) {
         self.voiceLabel.text = [NSString stringWithFormat:@"[千问] %@ %.2fx%@",
-            g_qwenVoice, g_qwenRate, g_qwenInstr.length ? @" ·语气" : @""];
+            g_qwenVoice, g_qwenRate, g_qwenInstr.length ? [NSString stringWithFormat:@" ·%@", g_qwenInstr] : @""];
     } else if (g_voices.count) {
         self.voiceLabel.text = TTSCurVoice();
     } else {
@@ -1740,8 +1748,8 @@ static UIImage *TTSLoadBallImage(void) {
     [listPanel addSubview:sb];
     self.searchField = sb;
 
-    /* ===== v30: 千问设置区（语速滑杆 + 语气指令输入框） ===== */
-    UIView *qwSet = [[UIView alloc] initWithFrame:CGRectMake(0, 84, lw, 92)];
+    /* ===== v30.1: 千问设置区（语速滑杆 + 情绪标签条——点选模式，自动下发指令） ===== */
+    UIView *qwSet = [[UIView alloc] initWithFrame:CGRectMake(0, 84, lw, 88)];
     qwSet.tag = 9540;
     qwSet.backgroundColor = [UIColor colorWithRed:0.95 green:0.97 blue:1.0 alpha:1];
     [listPanel addSubview:qwSet];
@@ -1767,32 +1775,44 @@ static UIImage *TTSLoadBallImage(void) {
     [slider addTarget:self action:@selector(qwRateChanged:) forControlEvents:UIControlEventValueChanged];
     [qwSet addSubview:slider];
 
-    UILabel *instrL = [[UILabel alloc] initWithFrame:CGRectMake(12, 34, 32, 18)];
+    /* 语气：情绪标签条（点选循环 高亮），不再手输 */
+    UILabel *instrL = [[UILabel alloc] initWithFrame:CGRectMake(12, 32, 32, 18)];
     instrL.text = @"语气";
     instrL.font = [UIFont boldSystemFontOfSize:12];
     instrL.textColor = [UIColor colorWithRed:0.1 green:0.3 blue:0.7 alpha:1];
     [qwSet addSubview:instrL];
 
-    UITextField *instrF = [[UITextField alloc] initWithFrame:CGRectMake(44, 30, lw-56, 26)];
-    instrF.placeholder = @"如：沉稳缓慢地播新闻 / 用河南话说";
-    instrF.text = g_qwenInstr;
-    instrF.font = [UIFont systemFontOfSize:12];
-    instrF.textColor = UIColor.blackColor;
-    instrF.backgroundColor = UIColor.whiteColor;
-    instrF.layer.cornerRadius = 6;
-    instrF.tag = 9543;
-    instrF.returnKeyType = UIReturnKeyDone;
-    [instrF addTarget:self action:@selector(qwInstrChanged:) forControlEvents:UIControlEventEditingDidEnd];
-    [instrF addTarget:self action:@selector(qwInstrDone:) forControlEvents:UIControlEventEditingDidEndOnExit];
-    [qwSet addSubview:instrF];
+    /* v30.1: 情绪标签条（数据源=全局 g_qwEmoNames，点选即下发指令） */
+    UIScrollView *emoScroll = [[UIScrollView alloc] initWithFrame:CGRectMake(44, 28, lw-56, 30)];
+    emoScroll.showsHorizontalScrollIndicator = NO;
+    emoScroll.tag = 9545;
+    CGFloat ex = 0;
+    for (NSUInteger ei = 0; ei < QW_EMO_COUNT; ei++) {
+        NSString *en = g_qwEmoNames[ei];
+        UIButton *eb = [UIButton buttonWithType:UIButtonTypeSystem];
+        eb.frame = CGRectMake(ex, 2, MAX(44, en.length * 16 + 20), 26);
+        [eb setTitle:en forState:UIControlStateNormal];
+        eb.titleLabel.font = [UIFont systemFontOfSize:12];
+        eb.layer.cornerRadius = 13;
+        eb.tag = 9600 + (int)ei;   /* 9600+idx → qwEmoTapped 逆映射 */
+        [eb addTarget:self action:@selector(qwEmoTapped:) forControlEvents:UIControlEventTouchUpInside];
+        /* 高亮当前选中（g_qwenInstr 显示名匹配） */
+        BOOL cur = [g_qwenInstr isEqualToString:[self qwEmoDisplayForIdx:ei]];
+        eb.backgroundColor = cur ? [UIColor colorWithRed:0.12 green:0.45 blue:0.95 alpha:1] : UIColor.whiteColor;
+        [eb setTitleColor:cur ? UIColor.whiteColor : [UIColor colorWithWhite:0.25 alpha:1] forState:UIControlStateNormal];
+        [emoScroll addSubview:eb];
+        ex += MAX(44, en.length * 16 + 20) + 8;
+    }
+    emoScroll.contentSize = CGSizeMake(ex, 30);
+    [qwSet addSubview:emoScroll];
 
-    UILabel *hintL = [[UILabel alloc] initWithFrame:CGRectMake(12, 64, lw-24, 22)];
+    UILabel *hintL = [[UILabel alloc] initWithFrame:CGRectMake(12, 62, lw-24, 22)];
     hintL.text = @"语速/语气只对千问音色（第一段）生效";
     hintL.font = [UIFont systemFontOfSize:10];
     hintL.textColor = [UIColor colorWithWhite:0.5 alpha:1];
     [qwSet addSubview:hintL];
 
-    UITableView *tv = [[UITableView alloc] initWithFrame:CGRectMake(0, 84 + 92, lw, lh-84-92)
+    UITableView *tv = [[UITableView alloc] initWithFrame:CGRectMake(0, 84 + 88, lw, lh-84-88)
                                                    style:UITableViewStylePlain];
     tv.tag = 9529;
     tv.dataSource = (id<UITableViewDataSource>)self;
@@ -1844,7 +1864,36 @@ static UIImage *TTSLoadBallImage(void) {
     });
 }
 
-/* ===== v30: 千问语速/语气控件 ===== */
+/* ===== v30.1: 千问语速滑杆 + 情绪标签 ===== */
+/* 显示名 → instruction 指令文本（千问 instruct 模型自然语言指令） */
+static NSString *qwEmoInstruction(NSString *display) {
+    if (display.length == 0 || [display isEqualToString:@"默认"]) return nil;
+    NSDictionary *map = @{
+        @"生气": @"用生气的语气说话，语调强硬，带着明显的不满",
+        @"愤怒": @"用愤怒的语气大喊，情绪激烈，充满怒火",
+        @"快乐": @"用快乐的语气说话，声音明亮上扬，充满感染力",
+        @"开心": @"用开心的语气说话，轻快活泼，带着笑意",
+        @"兴奋": @"用兴奋激动的语气说话，语速偏快，情绪高涨",
+        @"悲伤": @"用悲伤低沉的语气说话，声音低落，充满哀伤",
+        @"难过": @"用难过的语气说话，声音低沉，透着沮丧",
+        @"恐惧": @"用恐惧颤抖的语气说话，声音发紧，充满害怕",
+        @"害怕": @"用害怕的语气轻声说话，声音发抖，小心翼翼",
+        @"惊讶": @"用惊讶的语气说话，声音突然拔高，充满震惊",
+        @"温柔": @"用温柔的语气轻声说话，柔和缓慢，让人安心",
+        @"严肃": @"用严肃的语气说话，字正腔圆，不苟言笑",
+        @"沉稳": @"用沉稳的语气说话，声音厚实，镇定从容",
+        @"激动": @"用激动澎湃的语气说话，情绪饱满，声音有力",
+        @"委屈": @"用委屈的语气说话，声音发哽，带着哭腔",
+        @"撒娇": @"用撒娇的语气说话，拖长音调，软糯可爱",
+        @"嘲讽": @"用嘲讽轻蔑的语气说话，阴阳怪气，带着讥笑",
+        @"耳语": @"用耳语的方式轻声说话，气声为主，仿佛在耳边低语",
+        @"大喊": @"用大声呼喊的方式说话，音量全开，声嘶力竭",
+    };
+    return map[display];
+}
+- (NSString *)qwEmoDisplayForIdx:(NSUInteger)idx {
+    return (idx < QW_EMO_COUNT) ? g_qwEmoNames[idx] : @"";
+}
 - (void)qwRateChanged:(UISlider *)s {
     float v = s.value;
     /* 步进 0.25 显示更稳定 */
@@ -1861,14 +1910,26 @@ static UIImage *TTSLoadBallImage(void) {
     }
     TTLog(@"[qwen] rate=%.2f", v);
 }
-- (void)qwInstrChanged:(UITextField *)f {
-    NSString *t = [f.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    QwenSaveInstr(t);
-    TTLog(@"[qwen] instr=%@", t.length ? t : @"(清空)");
-}
-- (void)qwInstrDone:(UITextField *)f {
-    [self qwInstrChanged:f];
-    [f resignFirstResponder];
+- (void)qwEmoTapped:(UIButton *)b {
+    NSUInteger idx = (NSUInteger)(b.tag - 9600);
+    if (idx >= QW_EMO_COUNT) return;
+    NSString *display = g_qwEmoNames[idx];
+    NSString *instr = qwEmoInstruction(display);
+    QwenSaveInstr(instr ?: display);   /* 持久化存显示名（回显用），下发时转换 */
+    /* 全标签刷新高亮 */
+    UIView *p = [b superview];
+    if (p) {
+        for (UIView *v2 in p.subviews) {
+            if (v2.tag >= 9600 && [v2 isKindOfClass:[UIButton class]]) {
+                UIButton *eb = (UIButton *)v2;
+                NSUInteger i = (NSUInteger)(eb.tag - 9600);
+                BOOL cur = (i == idx);
+                eb.backgroundColor = cur ? [UIColor colorWithRed:0.12 green:0.45 blue:0.95 alpha:1] : UIColor.whiteColor;
+                [eb setTitleColor:cur ? UIColor.whiteColor : [UIColor colorWithWhite:0.25 alpha:1] forState:UIControlStateNormal];
+            }
+        }
+    }
+    TTLog(@"[qwen] emo=%@ instr=%@", display, instr ?: @"(默认)");
 }
 
 - (void)closeVoiceList {
@@ -2163,7 +2224,7 @@ static UIImage *TTSLoadBallImage(void) {
     };   /* v30: onAudio block 结束 */
 
     if (g_backend == 1) {
-        RequestQwenTTS(text, g_qwenVoice, g_qwenRate, g_qwenInstr, onAudio);
+        RequestQwenTTS(text, g_qwenVoice, g_qwenRate, qwEmoInstruction(g_qwenInstr), onAudio);
     } else {
         RequestTTS(text, voice, onAudio);
     }
