@@ -1,0 +1,52 @@
+name: build-qqfloat-v1
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - "QQFloat_v1.m"
+      - ".github/workflows/qqfloat-v1.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid || true
+
+      - name: Generate embedded resources (avatar + tip QR)
+        run: python3 build_res.py
+
+      - name: Build QQFloat_v1 dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 \
+            -Oz -fvisibility=hidden \
+            -fno-stack-protector \
+            -Xlinker -S -Xlinker -x -Xlinker -dead_strip \
+            -dynamiclib \
+            -framework Foundation -framework UIKit -framework AVFoundation -framework CoreGraphics \
+            -o QQFloat_v1.dylib \
+            QQFloat_v1.m
+
+      - name: Fake-sign with ldid
+        run: ldid -S QQFloat_v1.dylib || true
+
+      - name: Show result
+        run: |
+          ls -la QQFloat_v1.dylib
+          file QQFloat_v1.dylib
+          md5 QQFloat_v1.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QQFloat-v1-dylib
+          path: QQFloat_v1.dylib
