@@ -850,19 +850,24 @@ static UIImage *TTSLoadBallImage(void) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 if (![UIApplication sharedApplication].keyWindow) return;
-                /* 创建悬浮球 window（v24 形态：穿透 TTSPassWindow + 圆形头像） */
+                /* 创建悬浮球 window（v24 形态：穿透 TTSPassWindow + 圆形头像）
+                 * ⚠️ ball 必须加到 rootVC.view（透明），不能直接加 window——
+                 * window 的 rootViewController 自带一个全屏 view，会把直接加到 window 的 ball 盖住 */
                 static dispatch_once_t once;
                 dispatch_once(&once, ^{
                     CGRect scr = UIScreen.mainScreen.bounds;
                     UIWindow *w = [[TTSPassWindow alloc] initWithFrame:scr];
-                    w.rootViewController = [TTSRootController new];
+                    w.backgroundColor = UIColor.clearColor;
+                    TTSRootController *root = [TTSRootController new];
+                    w.rootViewController = root;
+                    root.view.backgroundColor = UIColor.clearColor;
                     w.windowLevel = UIWindowLevelAlert + 100;
-                    TTSFloatView *ball = [[TTSFloatView alloc] initWithFrame:CGRectMake(scr.size.width-70, 180, 56, 56)];
-                    ball.center = CGPointMake(scr.size.width-38, 200);
-                    [w addSubview:ball];
+                    TTSFloatView *ball = [[TTSFloatView alloc] initWithFrame:
+                        CGRectMake(scr.size.width - 72, scr.size.height * 0.42, 56, 56)];
+                    [root.view addSubview:ball];
                     g_ttsWindow = w;
                     [w makeKeyAndVisible];
-                    [UIApplication.sharedApplication.keyWindow makeKeyWindow];  /* 关键键盘还给QQ */
+                    TTLog(@"[ui] ball shown（rootVC.view 子视图，穿透窗口）");
                 });
                 TTSInitVoicesIfNeeded();
             });
