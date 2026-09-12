@@ -12,16 +12,6 @@
  *
  * 与微信版本质区别：不走录音管线替换，直接调发送方法传 silk 文件路径。
  */
- *
- * ==================== v30: 双后端（原中转站 440 音色 + 千问直连 48 音色） ====================
- *   - 音色列表分两个 section：千问（qwen3-tts-instruct-flash 直连 DashScope）/ 原接口（tiax 中转）
- *   - 千问后端支持：
- *       voice       48 个官方音色（Cherry/Serena/Ethan/方言组…）
- *       speech_rate 语速 0.5~2.0（滑杆）
- *       instruction 语气指令（自由文本，如"用河南话说，语速缓慢语气沉稳"）
- *   - 千问音色不依赖 ys.php 拉取（内置表），原接口音色仍走动态拉取
- *   - 后端选择持久化，重启微信保持
- */
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
