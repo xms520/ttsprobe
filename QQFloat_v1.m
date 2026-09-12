@@ -182,7 +182,7 @@ static void TTSCrashHandler(int sig, siginfo_t *info, void *uc) {
     _exit(128 + sig);
 }
 static void TTSInstallCrashGuards(void) {
-    NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/TTSCrash.log"];
+    NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/QQFloatCrash.log"];
     g_crashFd = open(p.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
     Dl_info di; void *self0 = (void *)&TTSInstallCrashGuards;
     if (dladdr(self0, &di)) {
@@ -1548,18 +1548,14 @@ static NSString *qwEmoInstruction(NSString *display) {
         handler = g_qqSenderHandler;
         msgAttrs = g_qqLastMsgAttrs;
     }
+    /* ⚠️ 不再现场 [[h alloc] init]——MsgSenderHandler 是 Swift 类，
+     * 无参 init 会命中 precondition/fatalError(SIGABRT)，@try 捕不住 → 闪退。
+     * handler 必须来自真实 sendTextMsg 捕获。 */
     if (!handler) {
-        /* v1 兜底: hook 未捕获(用户还没发过消息) → 主动创建 MsgSenderHandler 实例 */
-        Class h = NSClassFromString(@"_TtC10MsgManager16MsgSenderHandler");
-        if (h) {
-            @try {
-                id fresh = [[h alloc] init];
-                if (fresh) { @synchronized([NSObject class]) { g_qqSenderHandler = fresh; } handler = fresh;
-                    TTLog(@"[qq] MsgSenderHandler 现场创建 %p", (__bridge void *)fresh); }
-            } @catch (NSException *e) { TTLog(@"[qq] handler 创建失败 %@", e); }
-        }
+        self.statusLabel.text = @"先在QQ发一条文字消息完成捕捉";
+        TTLog(@"[qq] sendDirect 无 handler（未捕捉），提示先发文字");
+        return;
     }
-    if (!handler) { self.statusLabel.text = @"发送器未就绪(先发条文字消息捕捉)"; return; }
 
     [self.input resignFirstResponder];
     self.send.enabled = NO;
@@ -1690,6 +1686,7 @@ __attribute__((constructor))
 static void QQFloatV1Init(void) {
     g_logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/QQFloat.log"];
     QwenLoadState();
+    TTSInstallCrashGuards();   /* 崩了落 Documents/QQFloatCrash.log（信号+地址+dylib基址） */
     TTLog(@"QQFloat v1 init (千问双后端 + sendPttMsg 链)");
 
     Class h = NSClassFromString(@"_TtC10MsgManager16MsgSenderHandler");
