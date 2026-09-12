@@ -539,6 +539,139 @@ static NSString *QwenHost(void) {
 /* 千问合成：POST JSON → {"output":{"audio":{"url":OSS}}} → https 化下载
  * text: 合成文本  voiceID: 音色  rate: 语速 0.5~2.0  instr: 语气指令(可nil) */
 static void TTSDownloadAudio(NSString *audioURL, void (^done)(NSData *audio, NSError *error));   /* v30: 前置声明 */
+
+static BOOL TTSIsAudioData(NSData *d) {
+    if (d.length < 4) return NO;
+    const unsigned char *b = d.bytes;
+    if (b[0] == 'I' && b[1] == 'D' && b[2] == '3') return YES;
+    if (b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F') return YES;
+    if (b[0] == 0xFF && (b[1] & 0xF0) == 0xF0) return YES;
+    if (b[0] == 'f' && b[1] == 't' && b[2] == 'y' && b[3] == 'p') return YES;
+    if (b[0] == '{') return NO;
+    return NO;
+}
+
+static void TTSDownloadAudio(NSString *audioURL, void (^done)(NSData *audio, NSError *error)) {
+    NSURL *u = [NSURL URLWithString:audioURL];
+    if (!u) { done(nil, [NSError errorWithDomain:@"TTS" code:3 userInfo:@{NSLocalizedDescriptionKey:@"音频URL无效"}]); return; }
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithURL:u
+        completionHandler:^(NSData *audio, NSURLResponse *r2, NSError *e2) {
+            if (e2 != nil || audio.length == 0) {
+                done(nil, e2);
+            } else if (!TTSIsAudioData(audio)) {
+                done(nil, [NSError errorWithDomain:@"TTS" code:7 userInfo:@{NSLocalizedDescriptionKey:@"CDN文件过期(NoSuchKey)"}]);
+            } else {
+                TTLog(@"[tts] audio %lu bytes", (unsigned long)audio.length);
+                done(audio, nil);
+            }
+        }];
+    [task resume];
+}
+
+static NSString *TiaxKey(void) {   /* v26: key 三段 hex 密文运行时解码，strings 直搜无果 */
+    static NSString *k = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        k = [TTSXorHex(K_KEY_A_HEX.UTF8String, 0x3C) stringByAppendingString:
+            [TTSXorHex(K_KEY_B_HEX.UTF8String, 0x3C) stringByAppendingString:
+              TTSXorHex(K_KEY_C_HEX.UTF8String, 0x3C)]];
+    });
+    return k;
+}
+
+static NSString *TTSEncode(NSString *s) {
+    return [s stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+}
+
+static void RequestTTSOnce(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
+    NSString *v = TTSVoiceIDForName(voice);   /* ⚠️ 接口只认数字 ID，不认中文名 */
+    NSString *k = TiaxKey();
+    if (k.length == 0) { done(nil, [NSError errorWithDomain:@"TTS" code:6 userInfo:@{NSLocalizedDescriptionKey:@"key未配置"}]); return; }
+    /* v26: 参数名拼装（binary 里搜不到 ?text=&voice=&apikey= 模板） */
+    NSString *urlStr = [TTSEndpoint() stringByAppendingString:
+        [NSString stringWithFormat:@"?%@=%@&%@=%@&%@=%@",
+         TTCSel(10), TTSEncode(text), TTCSel(11), TTSEncode(v), TTCSel(12), TTSEncode(k)]];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) { done(nil, [NSError errorWithDomain:@"TTS" code:1 userInfo:@{NSLocalizedDescriptionKey:@"URL无效"}]); return; }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.timeoutInterval = 30;
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+            if (e != nil) { done(nil, e); return; }
+            if (data.length == 0) { done(nil, [NSError errorWithDomain:@"TTS" code:2 userInfo:@{NSLocalizedDescriptionKey:@"API空返回"}]); return; }
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([json isKindOfClass:[NSDictionary class]]) {
+                NSString *aurl = json[@"url"];
+                if ([aurl isKindOfClass:[NSString class]] && aurl.length > 0) { TTSDownloadAudio(aurl, done); return; }
+                done(nil, [NSError errorWithDomain:@"TTS" code:4 userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"API无url: %@", json]}]);
+                return;
+            }
+            done(nil, [NSError errorWithDomain:@"TTS" code:5 userInfo:@{NSLocalizedDescriptionKey:@"非JSON返回"}]);
+        }];
+    [task resume];
+}
+
+static void RequestTTS(NSString *text, NSString *voice, void (^done)(NSData *audio, NSError *error)) {
+    __block NSInteger attempt = 0;
+    __block void (^retry)(NSData *, NSError *) = nil;
+    retry = ^(NSData *audio, NSError *error) {
+        attempt++;
+        if (audio != nil) { done(audio, nil); return; }
+        if (error.code == 7 && attempt < 3) {
+            TTLog(@"[tts] CDN过期重试 %ld", (long)attempt);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                           dispatch_get_global_queue(0, 0), ^{ RequestTTSOnce(text, voice, retry); });
+            return;
+        }
+        done(nil, error);
+    };
+    RequestTTSOnce(text, voice, retry);
+}
+
+/* ==================== mp3 → PCM ==================== */
+static NSData *DecodeToPCM(NSData *audioData) {
+    if (!audioData.length) return nil;
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"tts_%@.audio", NSUUID.UUID.UUIDString]];
+    if (![audioData writeToFile:path options:NSDataWritingAtomic error:nil]) return nil;
+
+    NSError *err = nil;
+    AVAudioFile *file = [[AVAudioFile alloc] initForReading:[NSURL fileURLWithPath:path] error:&err];
+    if (!file) { TTLog(@"[pcm] open fail %@", err); [[NSFileManager defaultManager] removeItemAtPath:path error:nil]; return nil; }
+
+    AVAudioFormat *src = file.processingFormat;
+    AVAudioFormat *dst = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:(double)g_targetSampleRate channels:1];
+    AVAudioConverter *conv = [[AVAudioConverter alloc] initFromFormat:src toFormat:dst];
+    if (!conv) { TTLog(@"[pcm] conv fail"); return nil; }
+
+    NSMutableData *pcm = [NSMutableData data];
+    while (file.framePosition < file.length) {
+        AVAudioFrameCount remain = (AVAudioFrameCount)(file.length - file.framePosition);
+        AVAudioFrameCount inFrames = MIN(remain, 4096);
+        AVAudioPCMBuffer *inBuf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:src frameCapacity:inFrames];
+        if (![file readIntoBuffer:inBuf error:nil]) break;
+        AVAudioPCMBuffer *outBuf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:dst frameCapacity:8192];
+        __block BOOL supplied = NO;
+        [conv convertToBuffer:outBuf error:nil withInputFromBlock:^AVAudioBuffer *(AVAudioPacketCount pk, AVAudioConverterInputStatus *st) {
+            if (supplied) { *st = AVAudioConverterInputStatus_NoDataNow; return nil; }
+            supplied = YES; *st = AVAudioConverterInputStatus_HaveData; return inBuf;
+        }];
+        if (outBuf.frameLength && outBuf.floatChannelData) {
+            float *samples = outBuf.floatChannelData[0];
+            for (AVAudioFrameCount i = 0; i < outBuf.frameLength; i++) {
+                float v = samples[i];
+                if (v > 1.0f) v = 1.0f; if (v < -1.0f) v = -1.0f;
+                int16_t s = (int16_t)(v * 32767.0f);
+                [pcm appendBytes:&s length:2];
+            }
+        }
+    }
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    TTLog(@"[pcm] %lu bytes", (unsigned long)pcm.length);
+    return pcm.length ? pcm : nil;
+}
+
+
 static void RequestQwenTTS(NSString *text, NSString *voiceID, float rate, NSString *instr,
                            void (^done)(NSData *audio, NSError *error)) {
     NSString *key = QwenKey();
@@ -702,7 +835,6 @@ static UIImage *TTSLoadBallImage(void) {
 - (void)kbWillShow:(NSNotification *)n;
 - (void)kbWillHide:(NSNotification *)n;
 - (void)sendDirect;
-- (NSString *)sendVoiceToWeChat:(NSData *)pcm toUsr:(NSString *)toUsr { return nil; }
 @end
 
 @implementation TTSFloatView
@@ -879,9 +1011,9 @@ static UIImage *TTSLoadBallImage(void) {
     [panel addSubview:vHint];
 
     /* v1 QQ: 面板状态 = 捕捉就绪状态 */
-    id h = nil;
-    @synchronized([NSObject class]) { h = g_qqSenderHandler; }
-    if (h) {
+    id readyObj = nil;
+    @synchronized([NSObject class]) { readyObj = g_qqSenderHandler; }
+    if (readyObj) {
         self.statusLabel.text = @"就绪：输入文字点合成（发到当前会话）";
     } else {
         self.statusLabel.text = @"先在QQ发一条文字消息完成捕捉";
