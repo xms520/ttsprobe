@@ -1839,6 +1839,22 @@ static void QQFloatV2Init(void) {
         }
         free(list);
         TTLog(@"[qq-scan] done classes=%d found=%d", n, found);
+        /* v2 诊断: 两关键类全量方法表(类自身方法, 含签名) —— 捕捉失败时 v3 直接照此表定 hook */
+        Class dumpCls[] = { NSClassFromString(@"_TtC15NTKernelAdapter14MessageService"),
+                            NSClassFromString(@"_TtC10MsgManager16MsgSenderHandler") };
+        for (int d = 0; d < 2; d++) {
+            Class c = dumpCls[d];
+            if (!c) { TTLog(@"[qq-dump] class MISS"); continue; }
+            unsigned cnt = 0;
+            Method *ml = class_copyMethodList(c, &cnt);
+            if (!ml) continue;
+            for (unsigned j = 0; j < cnt; j++) {
+                TTLog(@"[qq-dump] %s .%s [%s]",
+                      class_getName(c), sel_getName(method_getName(ml[j])),
+                      method_getTypeEncoding(ml[j]) ? method_getTypeEncoding(ml[j]) : "?");
+            }
+            free(ml);
+        }
     });
     TTLog(@"[qq-init] v2 hooks installed");
 }
