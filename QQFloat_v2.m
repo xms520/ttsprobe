@@ -1811,21 +1811,31 @@ static void QQFloatV2Init(void) {
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         int n = objc_getClassList(NULL, NULL);
         if (n <= 0 || n > 300000) return;
-        void **list = (void**)malloc((size_t)n * sizeof(void*));
+        Class *list = (Class *)malloc((size_t)n * sizeof(Class));
         n = objc_getClassList(list, &n);
         SEL s = sel_registerName("getMsgSenderHandlerWithcontact:");
         int found = 0;
         for (int i = 0; i < n; i++) {
-            Class c = (Class)list[i];
+            Class c = list[i];
+            if (!c) continue;
+            /* 快速预判：绝大多数类不响应该 selector，先跳过（避免 7 万类逐个 copyMethodList） */
+            if (!class_respondsToSelector(c, s)) continue;
             const char *cn = class_getName(c);
             if (!cn || !cn[0]) continue;
-            Method m = class_getInstanceMethod(c, s);
-            if (m && class_getName(method_getClass(m)) &&
-                strcmp(class_getName(method_getClass(m)), cn) == 0) {
-                TTLog(@"[qq-scan] getMsgSenderHandlerWithcontact: owner=%s types=%s",
-                      cn, method_getTypeEncoding(m));
-                if (++found >= 20) break;
+            /* 仅当方法"直接定义"在此类（非继承）才报 owner */
+            unsigned cnt2 = 0;
+            Method *ml2 = class_copyMethodList(c, &cnt2);
+            if (!ml2) continue;
+            for (unsigned j = 0; j < cnt2; j++) {
+                if (method_getName(ml2[j]) == s) {
+                    TTLog(@"[qq-scan] getMsgSenderHandlerWithcontact: owner=%s types=%s",
+                          cn, method_getTypeEncoding(ml2[j]));
+                    found++;
+                    break;
+                }
             }
+            free(ml2);
+            if (found >= 20) break;
         }
         free(list);
         TTLog(@"[qq-scan] done classes=%d found=%d", n, found);
