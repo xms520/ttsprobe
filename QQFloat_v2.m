@@ -1562,8 +1562,45 @@ static NSString *qwEmoInstruction(NSString *display) {
      * 无参 init 会命中 precondition/fatalError(SIGABRT)，@try 捕不住 → 闪退。
      * handler 必须来自真实 sendTextMsg 捕获。 */
     if (!handler) {
+        /* v3 兜底: 主动调 getMsgSenderHandlerWithcontact: 取 handler
+         * 需要 QQMsgService 实例——尝试 sharedInstance/shared/defaultService */
+        id qmsInst = nil;
+        Class qmsCls = NSClassFromString(@"QQMsgService");
+        if (qmsCls) {
+            SEL sharedSels[] = { sel_registerName("sharedInstance"), sel_registerName("shared"),
+                                  sel_registerName("defaultService"), sel_registerName("instance"),
+                                  sel_registerName("sharedMsgService"), sel_registerName("sharedService") };
+            for (int i = 0; i < 6 && !qmsInst; i++) {
+                if (class_respondsToSelector(qmsCls, sharedSels[i])) {
+                    qmsInst = [qmsCls performSelector:sharedSels[i]];
+                    if (qmsInst) TTLog(@"[qq] QQMsgService sharedInstance via %s: %p",
+                                       sel_getName(sharedSels[i]), (__bridge void*)qmsInst);
+                }
+            }
+        }
+        id peer = g_qqLastPeer;
+        if (qmsInst && peer) {
+            SEL getS = sel_registerName("getMsgSenderHandlerWithcontact:");
+            if ([qmsInst respondsToSelector:getS]) {
+                @try {
+                    id fresh = [qmsInst performSelector:getS withObject:peer];
+                    if (fresh) {
+                        const char *cn = class_getName(object_getClass(fresh));
+                        if (cn && strstr(cn, "MsgSenderHandler")) {
+                            @synchronized([NSObject class]) { g_qqSenderHandler = fresh; }
+                            handler = fresh;
+                            TTLog(@"[qq-cap] handler via=主动调用getMsgSenderHandler %p (%s)",
+                                  (__bridge void*)fresh, cn);
+                        } else TTLog(@"[qq] 主动调用返回非handler: %s", cn);
+                    } else TTLog(@"[qq] 主动调用返回 nil");
+                } @catch (NSException *e) { TTLog(@"[qq] 主动调用异常 %@", e); }
+            }
+        }
+    }
+    if (!handler) {
         self.statusLabel.text = @"先在QQ发任意消息(文字/图)完成捕捉";
-        TTLog(@"[qq] sendDirect 无 handler（未捕捉），msgService=%p peer=%p", (__bridge void*)[g_qqMsgService class] ?: nil, (__bridge void*)g_qqLastPeer);
+        TTLog(@"[qq] sendDirect 无 handler，msgService=%p peer=%p",
+              (__bridge void*)g_qqMsgService, (__bridge void*)g_qqLastPeer);
         return;
     }
 
@@ -1765,6 +1802,32 @@ static void QQHookSendMsgUnified(id self, SEL cmd, int64_t msgId, id peer, id el
     if (g_orig_sendMsgUnified)
         ((void(*)(id,SEL,int64_t,id,id,id,void*))g_orig_sendMsgUnified)(self,cmd,msgId,peer,elems,attrs,cb);
 }
+/* E: QQMsgService.getMsgSenderHandlerWithcontact:  @24@0:8@16
+ * (id self, SEL cmd, OCContact contact) → 返回 MsgSenderHandler 实例
+ * ⚠️ QQMsgService 是 ObjC 类（非 Swift），调用必走 objc_msgSend → hook 必触发
+ * 当 QQ 内部调它取 handler 时，捕获返回值 = MsgSenderHandler 实例 */
+static void *g_orig_getHandler = NULL;
+static id QQHookGetHandler(id self, SEL cmd, id contact) {
+    id r = nil;
+    if (g_orig_getHandler)
+        r = ((id(*)(id,SEL,id))g_orig_getHandler)(self, cmd, contact);
+    if (r) {
+        const char *cn = class_getName(object_getClass(r));
+        if (cn && strstr(cn, "MsgSenderHandler")) {
+            @synchronized([NSObject class]) {
+                if (g_qqSenderHandler != r) {
+                    g_qqSenderHandler = r;
+                    TTLog(@"[qq-cap] handler via=getMsgSenderHandlerWithcontact: %p (%s)",
+                          (__bridge void *)r, cn);
+                }
+            }
+        } else {
+            TTLog(@"[qq-cap] getMsgSenderHandler 返回非 handler: %s", cn ? cn : "?");
+        }
+    }
+    return r;
+}
+
 /* 安装单个 hook（类型编码不匹配则跳过，防 QQ 版本差异导致崩溃） */
 static void QQInstallHook(Class cls, const char *selname, const char *expectTypes, IMP newImp, void **origSlot, const char *tag) {
     SEL s = sel_registerName(selname);
@@ -1805,6 +1868,23 @@ static void QQFloatV2Init(void) {
         QQInstallHook(h, "sendAudioPlacehodlerMsgWithMsgAttributeInfos:audioModel:",
                       "v32@0:8@16@24", (IMP)QQHookSendAudioPh, &g_orig_sendAudioPh, "D-audioPh");
     } else TTLog(@"[qq-init] MsgSenderHandler MISS");
+
+    /* E: QQMsgService.getMsgSenderHandlerWithcontact: (ObjC类，hook必触发) */
+    Class qms = NSClassFromString(@"QQMsgService");
+    if (qms) {
+        QQInstallHook(qms, "getMsgSenderHandlerWithcontact:", "@24@0:8@16",
+                      (IMP)QQHookGetHandler, &g_orig_getHandler, "E-getHandler");
+        /* dump QQMsgService 类方法（找 sharedInstance/shared 主动取实例用） */
+        unsigned mc = 0;
+        Method *ml = class_copyMethodList(object_getClass(qms), &mc);
+        if (ml) {
+            for (unsigned j = 0; j < mc; j++)
+                TTLog(@"[qq-dump] QQMsgService+ .%s [%s]",
+                      sel_getName(method_getName(ml[j])),
+                      method_getTypeEncoding(ml[j]) ? method_getTypeEncoding(ml[j]) : "?");
+            free(ml);
+        }
+    } else TTLog(@"[qq-init] QQMsgService MISS");
 
     /* 运行时扫描: getMsgSenderHandlerWithcontact: 归属类（v3 主动取 handler 用，后台 5s 后执行） */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
