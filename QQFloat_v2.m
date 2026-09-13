@@ -1809,10 +1809,10 @@ static void QQFloatV2Init(void) {
     /* 运行时扫描: getMsgSenderHandlerWithcontact: 归属类（v3 主动取 handler 用，后台 5s 后执行） */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        int n = objc_getClassList(NULL, NULL);
+        int n = objc_getClassList(NULL, 0);
         if (n <= 0 || n > 300000) return;
         Class *list = (Class *)malloc((size_t)n * sizeof(Class));
-        n = objc_getClassList(list, &n);
+        n = objc_getClassList(list, n);
         SEL s = sel_registerName("getMsgSenderHandlerWithcontact:");
         int found = 0;
         for (int i = 0; i < n; i++) {
