@@ -1945,7 +1945,7 @@ static void QQFloatV2Init(void) {
                       method_getTypeEncoding(ml[j]) ? method_getTypeEncoding(ml[j]) : "?");
             free(ml);
         }
-        /* v3: dump QQMsgService 实例方法（含 send*/get*，供 v4 定位） */
+        /* v3: dump QQMsgService 实例方法表(全部 send/get 方法, 供 v4 定位) */
         unsigned mi = 0;
         Method *il = class_copyMethodList(qms, &mi);
         if (il) {
