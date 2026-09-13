@@ -1770,8 +1770,9 @@ static NSString *qwEmoInstruction(NSString *display) {
                         @try {
                             /* 双寄存器返回值 (x0,x1) 用内联汇拿 — struct{a,b} 返回在 x0/x1 正好对上
                              * (arm64 AAPCS64: 16B struct 由 x0,x1 各带一半) */
-                            struct { uint64_t a; uint64_t b; } r;
-                            r = ((struct { uint64_t a; uint64_t b; } (*)(id))bridgeSym)(silkPath);
+                            typedef struct { uint64_t a; uint64_t b; } BridgeRet;
+                            BridgeRet (*br)(id) = (BridgeRet (*)(id))bridgeSym;
+                            BridgeRet r = br(silkPath);
                             q0 = r.a; q1 = r.b;
                         } @catch (NSException *e) {
                             TTLog(@"[qq] bridge 调用异常 %@", e);
@@ -1825,6 +1826,7 @@ static NSString *qwEmoInstruction(NSString *display) {
                               (unsigned)t, fd, durBits,
                               (unsigned long long)q0, (unsigned long long)q1, (unsigned long)ms);
                     }
+                }
             } @catch (NSException *e) {
                 TTLog(@"[qq] AudioModel 构造异常 %@", e);
                 dispatch_async(dispatch_get_main_queue(), ^{
