@@ -1752,48 +1752,69 @@ static NSString *qwEmoInstruction(NSString *display) {
                      *   audioType@+8 size1 | audioFilePath@+0x10 size16(Swift String)
                      *   audioDuration@+0x20 size4(float) | placeholderMsgType@+0x41 size1
                      *   isAIVoice@+0x42 size1 (布局 ro fileoff 0x1ec2e450 静态实锤)
-                     * audioFilePath 16B: dlsym 拿 QQ 内部 _unconditionallyBridgeFromObjectiveC
-                     *   (NSString*) → 返回 (x0,x1) 双寄存器 = Swift String 16B → memcpy 落地 */
+                     * v3.7 桥调用 ABI 修正: Swift static func 调用约定 = (metatype, arg) 双参!
+                     *   v3.6 只传 x0=NSString → q0=0x88 q1=0x5000... 垃圾(真机日志实锤)
+                     * 修正: $sSSMa 拿 String.Type → 双参调桥 → 位型判定; 不合法换单参; 
+                     *   再不成立 → 手工 borrowed 布局兜底 + 等 [qq-real] 真实位型(D钩子已加dump) */
                     void *bridgeSym = dlsym(RTLD_DEFAULT,
                         "_$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ");
                     if (!bridgeSym)
                         bridgeSym = dlsym(RTLD_DEFAULT, "_unconditionallyBridgeFromObjectiveC");
-                    if (!bridgeSym) {
-                        /* 兜底: 任何 Swift 模块导出的同名静态方法都行 (Swift stdlib 同符号) */
-                        bridgeSym = dlsym(RTLD_DEFAULT, "$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ");
-                    }
                     TTLog(@"[qq] bridgeSym=%p", bridgeSym);
+                    uint64_t sq0 = 0, sq1 = 0;
+                    BOOL bridgeOK = NO;
                     if (bridgeSym) {
-                        /* Swift ABI: static func (NSString?) -> String
-                         * x0 = NSString (传 NULL 亦安全, 返回空串), 返回值 16B 在 (x0, x1) */
-                        uint64_t q0 = 0, q1 = 0;
-                        @try {
-                            /* 双寄存器返回值 (x0,x1) 用内联汇拿 — struct{a,b} 返回在 x0/x1 正好对上
-                             * (arm64 AAPCS64: 16B struct 由 x0,x1 各带一半) */
-                            typedef struct { uint64_t a; uint64_t b; } BridgeRet;
-                            BridgeRet (*br)(id) = (BridgeRet (*)(id))bridgeSym;
-                            BridgeRet r = br(silkPath);
-                            q0 = r.a; q1 = r.b;
-                        } @catch (NSException *e) {
-                            TTLog(@"[qq] bridge 调用异常 %@", e);
+                        typedef struct { uint64_t a; uint64_t b; } BridgeRet;
+                        void *metaAcc = dlsym(RTLD_DEFAULT, "$sSSMa");
+                        TTLog(@"[qq] StringMetaAcc=%p", metaAcc);
+                        if (metaAcc) {
+                            /* $sSSMa: () -> String.Type (无参, 返回 metatype) */
+                            id (*metaFn)(void) = (id (*)(void))metaAcc;
+                            @try {
+                                id strType = metaFn();
+                                TTLog(@"[qq] String.Type=%p", (__bridge void *)strType);
+                                if (strType) {
+                                    BridgeRet (*br2)(id, id) = (BridgeRet (*)(id, id))bridgeSym;
+                                    BridgeRet r2 = br2(strType, silkPath);
+                                    sq0 = r2.a; sq1 = r2.b;
+                                    TTLog(@"[qq] 双参桥 q0=%#llx q1=%#llx",
+                                          (unsigned long long)sq0, (unsigned long long)sq1);
+                                }
+                            } @catch (NSException *e) {
+                                TTLog(@"[qq] metatype/双参桥异常 %@", e);
+                            }
                         }
-                        if (q0 == 0 && q1 == 0) {
-                            /* 桥返回全 0 = 不对(空串也应 q1 有 discriminator) — 警示但继续 */
-                            TTLog(@"[qq] ⚠️ String 桥返回 q0=0 q1=0 (桥可能未生效)");
+                        /* 位型判定: large/bridged String 两 qword 至少一个有高位标志位 */
+                        BOOL plausible = (sq1 >> 56) != 0 || (sq0 >> 56) != 0;
+                        if (!plausible && metaAcc == NULL) {
+                            /* 无 metatype 通道 → 单参直调(QQ 内部 thunk 就是这个形态) */
+                            @try {
+                                BridgeRet (*br)(id) = (BridgeRet (*)(id))bridgeSym;
+                                BridgeRet r = br(silkPath);
+                                sq0 = r.a; sq1 = r.b;
+                                TTLog(@"[qq] 单参桥 q0=%#llx q1=%#llx",
+                                      (unsigned long long)sq0, (unsigned long long)sq1);
+                            } @catch (NSException *e) { }
+                            plausible = (sq1 >> 56) != 0 || (sq0 >> 56) != 0;
                         }
-                        TTLog(@"[qq] String 桥结果 q0=%#llx q1=%#llx", (unsigned long long)q0, (unsigned long long)q1);
+                        bridgeOK = plausible;
+                    }
+                    if (bridgeOK) {
                         const char *base = (const char *)(__bridge void *)audioModel;
-                        memcpy((void *)(base + 0x10), &q0, 8);   /* Swift String 低 8 字节 */
-                        memcpy((void *)(base + 0x18), &q1, 8);   /* Swift String 高 8 字节 */
+                        memcpy((void *)(base + 0x10), &sq0, 8);
+                        memcpy((void *)(base + 0x18), &sq1, 8);
+                        TTLog(@"[qq] String 已落地 (桥)");
                     } else {
-                        /* 极端兜底: 手工构造 bridged 布局 — q0=NSString 指针,
-                         * q1 = 0x8000_0000_0000_0000 | 0x0F00 (bridged borrowed, count 藏 CF) 【推测,人工验证】 */
+                        /* 兜底: .cxx_destruct 会 bridgeObjectRelease [+0x18] →
+                         * 该槽必须可安全 release: 对象指针 或 bit63=1 的 tagged(空操作)
+                         * borrowed NSString: +0x10=NSString ptr, +0x18=0x8...(immortal borrowed)
+                         * 【推测,按 D钩子 [qq-real] 位型实锤后修正】 */
                         uint64_t p0 = (uint64_t)(__bridge void *)silkPath;
-                        uint64_t q1m = 0x8000000000000000ULL;
+                        uint64_t qq1 = 0x8000000000000000ULL;
                         const char *base = (const char *)(__bridge void *)audioModel;
                         memcpy((void *)(base + 0x10), &p0, 8);
-                        memcpy((void *)(base + 0x18), &q1m, 8);
-                        TTLog(@"[qq] bridgeSym MISS — 手工 bridged 布局写入");
+                        memcpy((void *)(base + 0x18), &qq1, 8);
+                        TTLog(@"[qq] ⚠️ 桥不成立 — 手工 borrowed 布局 (q0=ptr, q1=0x8...0)");
                     }
                     /* audioType: uint8 槽(size=1) — 1=silk【推测,按 sendResult 判决】 */
                     {
@@ -1946,6 +1967,30 @@ static void QQHookSendArk(id self, SEL cmd, NSData *byteData) {
 static void QQHookSendAudioPh(id self, SEL cmd, id attrs, id audioModel) {
     QQCapCls(self, "sendAudioPh");
     QQSaveAttrs((NSDictionary*)attrs);
+    /* v3.7: QQ 真实录音发送时 dump AudioModel 全槽位型 — String 16B 布局的唯一实锤来源
+     * (音频链 TTS 构造的 model 若崩, 对比真实位型即可定案) */
+    if (audioModel) {
+        @try {
+            const char *cn = class_getName(object_getClass(audioModel));
+            const unsigned char *p = (const unsigned char *)(__bridge const void *)audioModel;
+            uint64_t q0 = *(const uint64_t *)(p + 0x10);
+            uint64_t q1 = *(const uint64_t *)(p + 0x18);
+            uint8_t  ty = *(const uint8_t  *)(p + 8);
+            uint32_t db = *(const uint32_t *)(p + 0x20);
+            float    df = *(const float    *)(p + 0x20);
+            TTLog(@"[qq-real] %@ type=%u durF=%.1f durBits=%#x path.q0=%#llx path.q1=%#llx",
+                  @(cn ? cn : "?"), (unsigned)ty, df, db,
+                  (unsigned long long)q0, (unsigned long long)q1);
+            /* q0/q1 是 Swift String 位型 — small string 时 q0 低字节即前几个字符, 打出来判读 */
+            unsigned char raw[16];
+            memcpy(raw, p + 0x10, 16);
+            TTLog(@"[qq-real] raw16=%02x%02x%02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x%02x%02x",
+                  raw[0],raw[1],raw[2],raw[3],raw[4],raw[5],raw[6],raw[7],
+                  raw[8],raw[9],raw[10],raw[11],raw[12],raw[13],raw[14],raw[15]);
+        } @catch (NSException *e) {
+            TTLog(@"[qq-real] dump 异常 %@", e);
+        }
+    }
     if (g_orig_sendAudioPh)
         ((void(*)(id,SEL,id,id))g_orig_sendAudioPh)(self,cmd,attrs,audioModel);
 }
@@ -2049,7 +2094,7 @@ static void QQFloatV2Init(void) {
     g_logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/QQFloat.log"];
     QwenLoadState();
     TTSInstallCrashGuards();   /* 崩了落 Documents/QQFloatCrash.log（信号+地址+dylib基址） */
-    TTLog(@"QQFloat v3.6 init (裸内存直写 + 桥函数 String)");
+    TTLog(@"QQFloat v3.7 init (双参桥 + scan try + real-dump)");
 
     /* F: 统一出口（最高优先——发任何消息都触发） */
     Class ms = NSClassFromString(@"_TtC15NTKernelAdapter14MessageService");
@@ -2113,9 +2158,14 @@ static void QQFloatV2Init(void) {
         n = objc_getClassList(list, n);
         SEL s = sel_registerName("getMsgSenderHandlerWithcontact:");
         int found = 0;
+        /* v3.6.1: class_respondsToSelector 会触发类 realize → 某些类 +initialize 抛异常
+         * (真机实锤: ProtobufLite initializePBClassInfo 抛 "NoClass - Message Class not exist",
+         *  竞态时序: QQ 的 Protobuf 注册表未就绪时被我们提前唤醒 → uncaught → 闪退)
+         * → 每个类包 @try, 异常直接跳过该类继续扫描 */
         for (int i = 0; i < n; i++) {
             Class c = list[i];
             if (!c) continue;
+            @try {
             /* 快速预判：绝大多数类不响应该 selector，先跳过（避免 7 万类逐个 copyMethodList） */
             if (!class_respondsToSelector(c, s)) continue;
             const char *cn = class_getName(c);
@@ -2134,6 +2184,10 @@ static void QQFloatV2Init(void) {
             }
             free(ml2);
             if (found >= 20) break;
+            } @catch (NSException *e) {
+                /* ProtobufLite/Lazy 类 realize 失败 — 跳过 */
+                continue;
+            }
         }
         free(list);
         TTLog(@"[qq-scan] done classes=%d found=%d", n, found);
@@ -2143,6 +2197,7 @@ static void QQFloatV2Init(void) {
         for (int d = 0; d < 2; d++) {
             Class c = dumpCls[d];
             if (!c) { TTLog(@"[qq-dump] class MISS"); continue; }
+            @try {
             unsigned cnt = 0;
             Method *ml = class_copyMethodList(c, &cnt);
             if (!ml) continue;
@@ -2152,8 +2207,9 @@ static void QQFloatV2Init(void) {
                       method_getTypeEncoding(ml[j]) ? method_getTypeEncoding(ml[j]) : "?");
             }
             free(ml);
+            } @catch (NSException *e) { /* v3.6.1: 同上防 realize 异常 */ }
         }
     });
-    TTLog(@"[qq-init] v3.6 hooks installed");
+    TTLog(@"[qq-init] v3.7 hooks installed");
 }
 @end
