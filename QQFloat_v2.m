@@ -1567,10 +1567,11 @@ static NSString *qwEmoInstruction(NSString *display) {
         id qmsInst = nil;
         Class qmsCls = NSClassFromString(@"QQMsgService");
         if (qmsCls) {
-            SEL sharedSels[] = { sel_registerName("sharedInstance"), sel_registerName("shared"),
-                                  sel_registerName("defaultService"), sel_registerName("instance"),
-                                  sel_registerName("sharedMsgService"), sel_registerName("sharedService") };
-            for (int i = 0; i < 6 && !qmsInst; i++) {
+            SEL sharedSels[] = { sel_registerName("getInstance"), sel_registerName("sharedInstance"),
+                                  sel_registerName("shared"), sel_registerName("defaultService"),
+                                  sel_registerName("instance"), sel_registerName("sharedMsgService"),
+                                  sel_registerName("sharedService"), sel_registerName("default") };
+            for (int i = 0; i < 8 && !qmsInst; i++) {
                 if (class_respondsToSelector(qmsCls, sharedSels[i])) {
                     qmsInst = [qmsCls performSelector:sharedSels[i]];
                     if (qmsInst) TTLog(@"[qq] QQMsgService sharedInstance via %s: %p",
