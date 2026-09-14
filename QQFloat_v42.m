@@ -21,6 +21,116 @@
  *   - 不再有任何崩溃路径: isa 保留 + 兜底位型合法 + 全 FAIL 跳过发送
  *
  * ====================== 历史判决存档 ======================
+ * QQFloat_v40.m — v4.0: v3.9 日志判决（QQFloat.log 27098B, 2026-09-14 真机）:
+ *   ✅ 启动扫描稳定（qq-scan done classes=120968, 无 5s 闪退 — v3.7 修复①持续生效）
+ *   ✅ TTS→PCM(58346B/1823ms)→silk(16657B) 全链正常, handler 双路捕获正常
+ *   ✅ bridgeSym=0x1855cddf8 + StringMetaAcc=0x185bb811c 两行均打出（非零!）
+ *   ❌ 下一行 "[qq] String.Type=" 未打印 → 崩在 metaFn() 或紧随的 br2() 调用
+ *      v3.9 判决树第 2 条命中: 双参 ABI 仍不对
+ *
+ * v4.0 三处判决性修复（本轮静态反汇编新实锤）:
+ *   1.【桥真 ABI 定案】NTSendable setAudioFilePath: 段 (0x106e1fb40~0x106e1fb50):
+ *      str x19,[sp+0x50](新 NSString 先落栈) → ldr x0,[x28,#0xc78](String.Type)
+ *      → add x2,sp,#0x50(&NSString 栈槽) → mov w3,#1 → bl 0x107c22b20(桥)
+ *      即桥调用形态 = (x0=String.Type, x1=不读, x2=NSString*, w3=1), 返回 (x0,x1)=String 16B
+ *      v3.9 的 br2(strType, silkPath) 把 NSString 放 x1, x2 遗留垃圾 → 桥内消费 x2 垃圾 → SIGSEGV
+ *      v4.0: 桥调用改为四参 (meta, _, argPtr, 1), C 函数指针 (BridgeRet(*)(id,id,id,int))
+ *   2.【dlsym 符号前缀定案】Mach-O dlsym 符号名必须带前导下划线。
+ *      v3.6~v3.9 tier-3 无下划线 "$sSS...FZ"/"$sSSMa" 命中的 0x1855cddf8/0x185bb811c
+ *      是 flat-lookup 垃圾命中(与真符号无关) — v3.9 崩在这两个垃圾地址上。
+ *      v4.0: 桥三级 + meta accessor 全部带 "_" 前缀; 第三级无下划线路径删除。
+ *   3.【x28 Swift 上下文不可仿】QQ 内部桥调用的 x28 是编译器专用上下文寄存器
+ *      (init 批次 0x106e1f94c 反复 [x27/x28+0xc78/0xc88] 取 metadata), 外部 dylib
+ *      无法复现 — 外部唯一安全路径 = 系统符号 dlsym(带_)。NTSendable setter 依旧
+ *      禁触(v3.8 realize 崩实锤)。P3 small-string / 空串兜底保留不变。
+ *
+ * v4.0 判决树（下次日志）:
+ *   - bridgeSym=0x... 且首行 "[qq] StringMetaAcc=" 后紧跟 "[qq] String.Type=0x..." → 垃圾命中根除
+ *   - "[qq] 四参桥 q0=.. q1=.." 位型: q1 高 8 位 0xD0/0x90(堆对象) 或 q0 高字节 0xE0(small) → 桥闭环
+ *   - "String 已落地" → "sendPttMsg 已调用" → 聊天出语音条 = 全链闭环
+ *   - bridgeSym=0x0(tier 全 MISS) → P3 small-string(路径 ≤15B 才成立, NSTemporary 大概率走不到)
+ *     → 空串兜底: 不崩但发不出 → 让用户真实录一条语音, D 钩子 [qq-real] raw16 = 最终硬编码依据
+ *   - ⚠️ audioType=1 仍为假设值, sendResult code!=0 时按错误码改
+ *
+ * ====================== 历史判决存档 ======================
+ * QQFloat_v39.m — v3.9: v3.8 日志判决（QQFloat_1.log 30839B）:
+ *   日志停在: [qq] sendCls=INTAIOChatProtocol.NTSendableAudioModel
+ *   后续 lend/responds/P1 setter 全部没打 → 崩点 = class_createInstance(NTSendable)
+ *   或 respondsToSelector 触发的 Swift 类 realize（metadata accessor 深初始化）
+ *   【与 v3.7 ProtobufLite NoClass 同模式: 主动提前 realize 未就绪的桥类】
+ *   静态佐证（本轮 Mach-O 解析实锤）: NTSendableAudioModel 的 ro @0x11cd25740
+ *   flags=0x81(SWIFT), baseMethods=0, ivars=0 — 方法/ivar 全靠 Swift metadata 运行时挂,
+ *   任何 objc runtime 主动触碰都会走 metadata accessor → 深初始化链 → 崩
+ *   （NTAIOAudioModel 相反: qq-scan 12 万类扫过它都没事, 说明它 metadata 已就绪）
+ * v3.9 修复:
+ *   1) P1 整段删除（判决性移除, 不再触碰 NTSendable 类）
+ *   2) P2 dlsym 双参桥升为唯一首选（v3.6 真机实锤三级链命中非零 0x1855cddf8）
+ *   3) P3 small-string + 空串兜底保留; 落地正序 q0=count/flags@+0x10, q1=object@+0x18
+ * 历史判决存档见下
+ *
+ * QQFloat_v38.m — v3.8: v3.7 真机日志判决（QQFloat.log 31830B）:
+ *   ✅ 修复①生效: [qq-scan] done classes=121372 found=7, 两次启动 5s 后均不闪退
+ *   ❌ 修复②反退化: bridgeSym=0x0 + StringMetaAcc 日志缺失 → v3.7 手术时误删第三级 dlsym
+ *      (v3.6 源 bed526e 三级: 带下划线_$sSS...FZ → 无下划线_unconditionally... → 无下划线$sSS...FZ
+ *       命中的正是第三级; v3.7 2210b46 只剩前两级 → 全 MISS → 桥块整体跳过)
+ *   ❌ 兜底 borrowed 布局字段序写反 → 发送即崩:
+ *      v3.7 写 q0=NSString ptr / q1=0x8..0 (q0 当 object、q1 当 count)
+ *      实际 sendPtt 0x10862fa7c: mov x0,x28(=[model+0x18]); bl swift_bridgeObjectRetain
+ *          → q1=[+0x18] 是 object 侧!
+ *      .cxx_destruct 0x10862ee90 同样 release [self+0x18] → q1=object 实锤
+ *      实际 Swift String 布局: q0=[+0x10]=count/flags, q1=[+0x18]=object
+ * v3.8 定案修复:
+ *   1) 桥调用彻底废弃手工猜 ABI —— 改借 QQ 自己的 setter 产真 String:
+ *      _TtC18INTAIOChatProtocol20NTSendableAudioModel(静态实锤方法表有 setAudioFilePath:
+ *      imp 0x106e1fb48, 内部 bl 桥函数把 NSString 转成 16B Swift String)
+ *      → 创建 NTSendableAudioModel 实例 → 调官方 setAudioFilePath: → memcpy 16B 槽位到
+ *      NTAIOAudioModel+0x10 (只借字段, 不把这个 model 传给 sendPtt)
+ *   2) setter 路径 MISS 才走 small-string 手工布局:
+ *      路径 ≤15B ASCII → q0=前8B LE + q1=0xE*0x100|count<<56|(第9-15B) 内联
+ *      不成立 → 唯一安全兜底 q0=0(空串),q1=0 并 WARN (发不出但不崩, 看 [qq-real] 补位型)
+ *   3) 保留 v3.7 的 dlsym 双参桥路径作为第三优先级尝试(补回第三级 dlsym 符号)
+ * v3.7 历史判决存档见此注释下方
+ *
+ * v3.6: 静态铁证定案: _TtC10MsgManager15NTAIOAudioModel 方法表只有
+ *   init + .cxx_destruct —— 根本没有 setAudioFilePath:/setAudioType:/setAudioDuration:!
+ *   (v3.5 respondsToSelector MISS 实锤; 那批 setter @0x106e1f94c 属 NTSendableAudioModel)
+ *   → v3.5 回退 object_setIvar 又是老坑:
+ *     1) object_setIvar(@(1)) 到 audioType(size=1 uint8 槽) → 写 8B NSNumber 指针 → +8..+0xF 全污染
+ *     2) object_setIvar(@(ms)) 到 audioDuration(size=4 float 槽) → 写 8B 指针 → float=指针位模式
+ *     3) audioFilePath 16B Swift String 从未正确落地 (日志 q0=NSString指针 q1=0 半初始化)
+ *   ivar 全布局(ro fileoff 0x1ec2e450 静态实锤, 与 v3.2 运行时 dump 一致):
+ *     audioType@+8 size1 | audioFilePath@+0x10 size16(Swift String) | audioDuration@+0x20 size4(float)
+ *     audioVolumePowerList@+0x28 size8 | audioRecordType@+0x30 size8 | voiceChangeType@+0x38 size8
+ *     autoConvertible@+0x40 size1 | placeholderMsgType@+0x41 size1 | isAIVoice@+0x42 size1
+ *   sendPtt 消费(0x10862f9c0 反汇编实锤): x25=[model+8]=type, ldp x26,x28,[model+0x10]=filePath 16B,
+ *     ldr s8,[model+0x20]=duration float; filePath 无效走 " not exist" 内联串分支
+ * v3.6 修复:
+ *   1) 全部弃 object_setIvar → 按 ivar size memcpy 裸内存直写 (type 1B / duration float 4B)
+ *   2) audioFilePath 16B Swift String: 调 QQ 内部桥函数 _unconditionallyBridgeFromObjectiveC
+ *      (运行时 dlsym 拿符号) 拿 (q0,q1) 双寄存器 → memcpy 16B 落地
+ *   3) class_createInstance 后先 memset 清零 instanceSize (空 String q0=0,q1=0 合法安全)
+ *   4) 回读 16B + 各槽日志判决
+ * 基于 TTSFloat_v30.1（千问双后端 + 440 原接口音色 + 情绪标签条 + 语速）
+ *
+ * v3 静态逆向定案（QQ 9.3.60, 623MB 主二进制实锤）：
+ *   QQMsgService 类 @0x11ee0ee90:
+ *     - 元类唯一方法 getInstance [静态实锤: dispatch_once 单例实现 @0x10e8643d8]
+ *     - 实例方法 25 个，含 getMsgSenderHandlerWithcontact: [v24@0:8@16] @imp 0x10e865b34
+ *       内部链: [contact convertToOCContact] → [XClass shared] → [x chatMsgHandlerEnumByChatInfo:ocContact]
+ *     - sendMsgWithOCContact:msgElems:msgAttributeInfos:callBack: [v48] 也为实例方法
+ *   MsgSenderHandler(Swift OC桥)
+ *     → sendPttMsgWithAudioModel:placeholderMsgInfo:msgAttributeInfos:saveDataToKernelResultBlock:sendMsgResultBlock:
+ *   NTAIOAudioModel: audioType / audioFilePath / placeholderMsgType / isAIVoice (KVC 写入)
+ *   silk 编码: QQSilkCodec encode:withSamplesCount:callback:
+ *
+ * v3 主动链（sendDirect 无 handler 时）：
+ *   id qms = [QQMsgService getInstance]                       ← 类方法，静态实锤
+ *   id h  = [qms getMsgSenderHandlerWithcontact:g_qqLastPeer] ← 主动调用 + E 钩子双保险
+ *   G 钩子: hook getMsgSenderHandlerWithcontact: 本体（QQ 内部任何调用都自动捕获 handler）
+ *
+ * 与微信版本质区别：不走录音管线替换，直接调发送方法传 silk 文件路径。
+ */
+
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
