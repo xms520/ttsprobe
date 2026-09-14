@@ -2240,7 +2240,8 @@ static void QQHookSendPtt(id self, SEL cmd, id audioModel, id phInfo, id attrs,
         }
     }
     if (g_orig_sendPtt)
-        ((void(*)(id,SEL,id,id,id,void*,void*))g_orig_sendPtt)(self,cmd,audioModel,phInfo,attrs,saveBlk,sendBlk);
+        ((void(*)(id,SEL,id,id,id,void(^)(BOOL),void(^)(int,NSString*)))g_orig_sendPtt)
+            (self,cmd,audioModel,phInfo,attrs,saveBlk,sendBlk);
 }
 /* J: sendAiVoiceMsgWithGroupCode:voiceType:voiceTimbreID:text:msgAttributeInfos:sendMsgResultBlock:
  * v60@0:8Q16I24@28@36@44@?52 — QQ 自带 AI 语音发送(群聊)。用户用到时抓 groupCode/voiceType */
@@ -2253,7 +2254,7 @@ static void QQHookSendAiVoice(id self, SEL cmd, uint64_t groupCode, uint32_t voi
           (unsigned long long)groupCode, (unsigned)voiceType,
           timbreID ?: @"(nil)", (unsigned long)text.length);
     if (g_orig_sendAiVoice)
-        ((void(*)(id,SEL,uint64_t,uint32_t,NSString*,NSString*,id,void*))g_orig_sendAiVoice)
+        ((void(*)(id,SEL,uint64_t,uint32_t,NSString*,NSString*,id,void(^)(int,NSString*)))g_orig_sendAiVoice)
             (self,cmd,groupCode,voiceType,timbreID,text,attrs,cb);
 }
 /* F: NTKernelAdapter.MessageService 统一出口  v56@0:8q16@24@32@40@?48
