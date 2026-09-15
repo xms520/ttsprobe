@@ -833,7 +833,8 @@ static NSUInteger SilkEncodeFrames(id codec, NSData *pcm, uint32_t rate,
     NSUInteger frame = 20 * rate / 1000;   /* 320 */
     __block uint64_t lastN = 0;
     __block const void *lastD = NULL;
-    NSUInteger nF = 0, voice = 0, cbs = 0;
+    NSUInteger nF = 0, voice = 0;
+    __block NSUInteger cbs = 0;
     for (NSUInteger off = 0; off + frame <= total && nF < maxFrames; off += frame) {
         @autoreleasepool {
             NSData *chunk = [NSData dataWithBytes:samples+off length:frame*2];
@@ -902,7 +903,7 @@ static NSData *QQSilkEncode(NSData *pcm, uint32_t rate) {
         @try {
             Class rc = NSClassFromString(@"QQSilkRecorder");
             if (rc) {
-                id rec = ((id (*)(id, SEL, uint64_t, uint64_t))objc_msgSend)
+                id rec = ((id (*)(id, SEL))objc_msgSend)
                     ((id)rc, NSSelectorFromString(@"alloc"));
                 rec = ((id (*)(id, SEL, uint64_t, uint64_t))objc_msgSend)
                     (rec, NSSelectorFromString(@"initWithSampleRate:andBitRate:"),
@@ -949,7 +950,7 @@ static NSData *QQSilkEncode(NSData *pcm, uint32_t rate) {
         } else if (bi == 1) {
             @try {
                 Class rc = NSClassFromString(@"QQSilkRecorder");
-                id rec = ((id (*)(id, SEL, uint64_t, uint64_t))objc_msgSend)
+                id rec = ((id (*)(id, SEL))objc_msgSend)
                     ((id)rc, NSSelectorFromString(@"alloc"));
                 rec = ((id (*)(id, SEL, uint64_t, uint64_t))objc_msgSend)
                     (rec, NSSelectorFromString(@"initWithSampleRate:andBitRate:"),
