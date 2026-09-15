@@ -1194,6 +1194,10 @@ static NSData *QQSilkEncode(NSData *pcm, uint32_t rate) {
 
 
 
+
+/* ==================== UI ==================== */
+static UIWindow *g_ttsWindow = nil;
+
 /* ===== v4.22: 自动「按住说话」 =====
  * 思路: QQ 的语音录制必须由 UI 触发(录音开始→initEncoder→encode…→松手发送)。
  * 我们不碰任何内部编码 API(零崩溃风险), 只是替用户按住那个「按住说话」按钮:
@@ -1248,9 +1252,6 @@ static UIView *TTFindVoiceButton(NSMutableArray *outLabels) {
     }
     return hit;
 }
-
-/* ==================== UI ==================== */
-static UIWindow *g_ttsWindow = nil;
 
 /* v24: 头像（悬浮球 + 面板左上角共用） */
 static UIImage *TTSLoadBallImage(void) {
