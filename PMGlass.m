@@ -1,13 +1,260 @@
-// ---------------- 主线程投递（v34: iOS 27 标准兼容 —— GCD 主队列）----------------
-// 替代 v45 的 task_threads + dlsym(CFRunLoopPerformBlock) 方案：
-//  · 旧方案遍历 mach 线程表（iOS 27 已收紧沙盒 mach API → 闪退）+ dlopen(CF)/dlsym 私有符号
-//  · 新方案 dispatch_get_main_queue 是系统标准入口，主线程串行执行，零权限零私有API，
-//    所有 iOS 版本（含 27）通用且演进保证。
+//
+//  PMG v19
+//  ────────────────────────────────────────────────────────────────────────
+//  引擎 = PMLib v45 原版逐字保留（实测秒杀生效那版）：
+//    pthread worker 探测 → CFRunLoopPerformBlock 投递主线程 install
+//    → UpdateBeat 每帧回调 → hook ed.UnitComponent.TakeDamage/LoseHP
+//    → sc_f 文件通道（god/onehit）→ 30s ping 自愈
+//  UI = 玻璃按钮/面板；开关按钮写 sc_f（≤2s 生效）
+//  注入：TrollFools / TrollStore 注入到 IGame-Mainland
+//
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <math.h>
+#include <dispatch/dispatch.h>
+#include <mach/mach.h>
+#include <limits.h>
+#include <pthread.h>
+#include "pm_res_tip.h"
+#include "pm_res_ball.h"
+
+typedef struct lua_State lua_State;
+static lua_State* (*L_getstate)(void);
+static lua_State* (*L_toluamain)(void);
+static int (*L_loadstring)(lua_State*, const char*);
+static int (*L_pcall)(lua_State*, int, int, int);
+static int (*L_gettop)(lua_State*);
+static int (*L_settop)(lua_State*, int);
+static const char* (*L_tolstring)(lua_State*, int, size_t*);
+
+typedef void Il2CppDomain; typedef void Il2CppImage; typedef void Il2CppClass;
+typedef void Il2CppAssembly; typedef void FieldInfo;
+static void* (*I_domain_get_orig)(void);
+static Il2CppDomain* (*I_domain_get)(void);
+static Il2CppAssembly** (*I_domain_assemblies)(const Il2CppDomain*, size_t*);
+static const Il2CppImage* (*I_asm_get_image)(Il2CppAssembly*);
+static const char* (*I_image_get_name)(const Il2CppImage*);
+static Il2CppClass* (*I_class_from_name)(const Il2CppImage*, const char*, const char*);
+static FieldInfo* (*I_class_field)(Il2CppClass*, const char*);
+static void (*I_field_static_get)(FieldInfo*, void*);
+static void* (*I_thread_attach)(Il2CppDomain*);
+
+static void* g_uf = NULL;
+static lua_State* g_L = NULL;
+
+static volatile int f_godmode = 0, f_onehit = 0, f_dump = 0;   // onehit: 0=关 1=温和x1000 2=暴力（纯三态）
+static volatile int f_mult = 1;   // 攻击倍率独立状态：1..10（1=原始伤害）；与秒杀完全解耦
+static volatile int f_forge = 0;   // v32 日志伪造 0=关 1=录 2=换
+static volatile int f_probe = 0;
+static int g_dump_done = 0, g_probe_done = 0;  // 一次性动作防重入
+static FILE* g_log = NULL;
+#define LOG(...) do { if (g_log) { fprintf(g_log, __VA_ARGS__); fflush(g_log); } } while(0)
+
+// ═══ v33 极早期崩溃日志（不依赖 getenv/NSBundle/FILE*，用裸 open/write —— 启动最早期唯一可靠路径）═══
+static int g_diag_fd = -1;
+static void diag_open(void) {
+    if (g_diag_fd >= 0) return;
+    const char* h = getenv("HOME");
+    char p[512];
+    if (h) snprintf(p, sizeof(p), "%s/Documents/crash_diag.log", h);
+    else   snprintf(p, sizeof(p), "/tmp/crash_diag.log");
+    g_diag_fd = open(p, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+}
+#define DIAG(...) do { \
+    char _b[256]; int _n = snprintf(_b, sizeof(_b), __VA_ARGS__); \
+    if (_n > 0) { if (g_diag_fd < 0) diag_open(); \
+        if (g_diag_fd >= 0) { write(g_diag_fd, _b, (size_t)(_n > (int)sizeof(_b) ? (int)sizeof(_b) : _n)); \
+            fsync(g_diag_fd); } } \
+} while(0)
+
+extern uint32_t _dyld_image_count(void);
+extern const char* _dyld_get_image_name(uint32_t image_index);
+
+// v3: 逐镜像 dlsym 扫描（TataDiag v4 已验证成功的方案）
+// 注：镜像名后缀匹配不可靠（v2 因此失败），直接探测哪个镜像含 igame_getLuaState
+static void find_uf(void) {
+    if (g_uf) return;
+    uint32_t n = _dyld_image_count();
+    DIAG("[find_uf] count=%u\n", n);
+    static int scanned = 0;
+    int idx = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const char* nm = _dyld_get_image_name(i);
+        if (!nm) continue;
+        // 跳过系统库（igame/lua 不在系统路径），大幅减少 dlopen 次数
+        if (strncmp(nm, "/usr/lib", 8) == 0 || strncmp(nm, "/System/", 8) == 0 ||
+            strncmp(nm, "/Developer/", 11) == 0) continue;
+        void* h = dlopen(nm, RTLD_LAZY | RTLD_NOLOAD);
+        if (!h) continue;
+        if (dlsym(h, "igame_getLuaState") || dlsym(h, "luaL_loadstring")) {
+            g_uf = h;
+            LOG("UF found at scan#%d (%s)\n", idx, nm);
+            return;
+        }
+        idx++;
+    }
+    scanned++;
+    if (scanned == 1) LOG("first scan done, %d non-system imgs, no UF yet\n", idx);
+}
+
+static void resolve_syms(void) {
+    if (!g_uf) return;
+    if (!L_getstate) {
+    L_getstate  = (void*)dlsym(g_uf, "igame_getLuaState");
+    L_toluamain = (void*)dlsym(g_uf, "tolua_getmainstate");
+    L_loadstring= (void*)dlsym(g_uf, "luaL_loadstring");
+    L_pcall     = (void*)dlsym(g_uf, "lua_pcall");
+    L_gettop    = (void*)dlsym(g_uf, "lua_gettop");
+    L_settop    = (void*)dlsym(g_uf, "lua_settop");
+    L_tolstring = (void*)dlsym(g_uf, "lua_tolstring");
+    I_domain_get      = (void*)dlsym(g_uf, "il2cpp_domain_get");
+    I_domain_assemblies = (void*)dlsym(g_uf, "il2cpp_domain_get_assemblies");
+    I_asm_get_image   = (void*)dlsym(g_uf, "il2cpp_assembly_get_image");
+    I_image_get_name  = (void*)dlsym(g_uf, "il2cpp_image_get_name");
+    I_class_from_name = (void*)dlsym(g_uf, "il2cpp_class_from_name");
+    I_class_field     = (void*)dlsym(g_uf, "il2cpp_class_get_field_from_name");
+    I_field_static_get= (void*)dlsym(g_uf, "il2cpp_field_static_get_value");
+    I_thread_attach   = (void*)dlsym(g_uf, "il2cpp_thread_attach");
+    }
+}
+
+static int lua_dostring(const char* code) {
+    if (!g_L || !L_loadstring || !L_pcall) return -100;
+    int top = L_gettop(g_L);
+    if (L_loadstring(g_L, code) != 0) {
+        const char* e = L_tolstring ? L_tolstring(g_L, -1, NULL) : NULL;
+        LOG("lua load err: %s\n", e ? e : "?");
+        if (L_settop) L_settop(g_L, top);
+        return -101;
+    }
+    if (L_pcall(g_L, 0, 0, 0) != 0) {
+        const char* e = L_tolstring ? L_tolstring(g_L, -1, NULL) : NULL;
+        LOG("lua pcall err: %s\n", e ? e : "?");
+        if (L_settop) L_settop(g_L, top);
+        return -102;
+    }
+    if (L_settop) L_settop(g_L, top);
+    return 0;
+}
+
+static void sync_cfg(void) {
+    // v11 前：开关仅记录状态（Lua 侧 hook 等全局表分析后再接）
+    LOG("cfg sync: god=%d onehit=%d mult=x%d\n", f_godmode, f_onehit, f_mult);
+}
+
+static void try_get_lua(void) {
+    if (L_getstate) {
+        lua_State* s = L_getstate();
+        if (s) { g_L = s; LOG("lua via igame_getLuaState=%p\n", s); return; }
+    }
+    if (L_toluamain) {
+        lua_State* s = L_toluamain();
+        if (s) { g_L = s; LOG("lua via tolua_getmainstate=%p\n", s); return; }
+    }
+    if (I_domain_get && I_domain_assemblies && I_asm_get_image && I_image_get_name &&
+        I_class_from_name && I_class_field && I_field_static_get && L_loadstring && L_pcall) {
+        Il2CppDomain* dom = I_domain_get();
+        if (!dom) return;
+        size_t n = 0;
+        Il2CppAssembly** asms = I_domain_assemblies(dom, &n);
+        for (size_t i = 0; i < n; i++) {
+            const Il2CppImage* img = I_asm_get_image(asms[i]);
+            if (!img) continue;
+            const char* nm = I_image_get_name(img);
+            if (!nm || strcmp(nm, "Assembly-CSharp.dll") != 0) continue;
+            Il2CppClass* k = I_class_from_name(img, "LuaInterface", "LuaState");
+            if (!k) break;
+            FieldInfo* f = I_class_field(k, "mainState");
+            if (!f) break;
+            if (I_thread_attach) I_thread_attach(dom);
+            void* val = NULL;
+            I_field_static_get(f, &val);
+            LOG("mainState field val=%p\n", val);
+            if (val) {
+                // val = LuaState 对象指针；LuaStatePtr 子布局 L @ obj+16
+                lua_State* cand = *(lua_State**)((char*)val + 16);
+                LOG("candidate L at +16 = %p\n", (void*)cand);
+                if (cand) {
+                    int top = L_gettop(cand);
+                    if (L_loadstring(cand, "return 1") == 0 && L_pcall(cand, 0, 1, 0) == 0) {
+                        g_L = cand; LOG("lua via il2cpp mainState=%p VERIFIED\n", cand);
+                        L_settop(cand, top);
+                        return;
+                    }
+                    if (L_settop) L_settop(cand, top);
+                }
+            }
+            break;
+        }
+    }
+}
+
+// ---------------- v10: 无 UI 版 ----------------
+// 开关方式：Documents/sc_f 文件（每行一个 key=value，worker 每0.5s读取）
+// 支持 key: god=1/0, onehit=1/0, speed=3/1, dump=1(一次性)
+static void read_flags(void) {
+    const char* home = getenv("HOME");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/Documents/sc_f", home ? home : "/var/mobile");
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+    char line[128];
+    int newgod = f_godmode, newhit = f_onehit, newmult = f_mult, newdump = 0, newprobe = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "god=1", 5) == 0) newgod = 1;
+        else if (strncmp(line, "god=0", 5) == 0) newgod = 0;
+        else if (strncmp(line, "onehit=1", 8) == 0) newhit = 1;
+        else if (strncmp(line, "onehit=2", 8) == 0) newhit = 2;
+        else if (strncmp(line, "onehit=0", 8) == 0) newhit = 0;
+        else if (strncmp(line, "mult=", 5) == 0) { int m = atoi(line + 5); if (m >= 1 && m <= 10) newmult = m; }
+        else if (strncmp(line, "dump=1", 6) == 0) newdump = 1;
+        else if (strncmp(line, "probe=1", 7) == 0) newprobe = 1;
+    }
+    fclose(f);
+    if (newgod != f_godmode) { f_godmode = newgod; LOG("flag: god=%d\n", newgod); sync_cfg(); }
+    if (newhit != f_onehit) { f_onehit = newhit; LOG("flag: onehit=%d\n", newhit); sync_cfg(); }
+    if (newmult != f_mult)  { f_mult = newmult; LOG("flag: mult=x%d\n", newmult); sync_cfg(); }
+    if (newprobe && !g_probe_done) {
+        g_probe_done = 1;
+        f_probe = 1;
+        LOG("flag: probe requested\n");
+        char wpath2[512];
+        snprintf(wpath2, sizeof(wpath2), "%s/Documents/sc_f", home ? home : "/var/mobile");
+        FILE* wf2 = fopen(wpath2, "w");
+        if (wf2) { fprintf(wf2, "probe=0\n"); fclose(wf2); LOG("flags rewritten (probe=0)\n"); }
+    }
+    if (newdump && !g_dump_done) {
+        g_dump_done = 1;
+        f_dump = 1;
+        LOG("flag: dump requested\n");
+        // 自动把 flags 文件里的 dump=1 清掉，防止每次轮询重复触发（闪退根因）
+        char wpath[512];
+        snprintf(wpath, sizeof(wpath), "%s/Documents/sc_f", home ? home : "/var/mobile");
+        FILE* wf = fopen(wpath, "w");
+        if (wf) {
+            fprintf(wf, "dump=0\n");
+            fclose(wf);
+            LOG("flags rewritten (dump=0)\n");
+        }
+    }
+}
+
+// ---------------- runloop 桥（v45 实测配方）----------------
+// v34: iOS 27 标准兼容 —— 主线程投递改用 GCD，runloop 桥(mach线程/dlsym)整段废弃
 static int ensure_main_runloop(void) {
-    // 主队列始终可用（系统保证）；dispatch_get_main_queue 到它上面执行 = 游戏主线程。
-    // 此函数保留名返回 1 即可（post_to_main 已改为纯 GCD，不再需要 runloop 句柄）。
+    // 主队列系统保证可用；dispatch_get_main_queue 即游戏主线程。保留此函数名返回1。
     return 1;
 }
+
 static int g_beat_ok = 0;   // v34: install 成功标志（失败则 30s 后重试）
 
 // v38: 把一段 C 回调投递到游戏主线程 runloop 执行（光遇 ExecuteLuaAsync 同款）
@@ -45,7 +292,7 @@ static void run_pending_on_main(void) {
 }
 static void post_to_main(void (*unused)(void)) {
     (void)unused;
-    // v34: iOS 27 标准兼容改法 —— 用 GCD 主队列投递，替代 mach thread + dlsym(CFRunLoop*)。
+    // v34: iOS 27 标准兼容 —— 用 GCD 主队列替代 task_threads+mach+dlsym(CFRunLoop*)。
     if (g_pending_job == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         LOG("pm-block-enter\n");
@@ -989,18 +1236,16 @@ __attribute__((constructor)) static void fg_ctor() {
         LOG("loaded in %s\n", bid.UTF8String);
 
 
-        // v34: worker 起线程延迟到 runtime 就绪后（不再在 constructor 里 pthread_create，
-        //       iOS 27 下 constructor 期(dyld load)起线程是闪退高危源。用 GCD 延迟到主循环后。
-        //       worker 内部是独立线程干重活（镜像扫描/dlopen），创建后立即 detach。）
-        DIAG("[ctor] worker start scheduled\n");
+        // v6：v45 原版 worker（pthread：探测→runloop桥→install→ping 自愈→flags 读）
+        // v34: pthread 延迟到 runtime 就绪后（constructor 期起线程 = iOS27 高危；改用 GCD）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             pthread_t t;
             int pcr = pthread_create(&t, NULL, worker, NULL);
             DIAG("[ctor] pthread_create rc=%d\n", pcr);
             if (pcr == 0) pthread_detach(t);
-            DIAG("[ctor] after pthread_detach\n");
         });
+        DIAG("[ctor] after pthread_detach\n");
 
         // App 启动后再挂 UI（构造函数早于 UIApplicationMain，需延迟）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
