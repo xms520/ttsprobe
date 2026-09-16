@@ -13,6 +13,12 @@
  *   4. OWN 路: 自己 alloc 对照(预期 voice=0)
  *   胜出路全量编码
  *
+ * ===== v5.2（修微信宿主的 QQ 前置拦截）=====
+ * v5.1 实测: 微信里点「合成语音」显示"先在QQ发任意消息完成捕捉"
+ *   → sendDirect 开头的 QQ 捕捉检查(handler 为空即 return)把微宿主拦在前面, 压根没走到 TTS/微信链
+ * v5.2: ① 该检查改为 !g_isWeChatHost 才生效; ② 面板文案按宿主区分(微信显示"点合成（微信自动发送/按住说话发送）")
+ *       ③ 宿主判断加类兜底(CMessageMgr/MMServiceCenter/CMessageWrap→微信; QQPttRecordBtn/QQMsgService→QQ)
+ *       ④ sendDirect 打印 [qq] sendDirect host=WECHAT/QQ 便于确认
  * ===== v5.1（微信侧补手动注入路）=====
  * v5.0 实测: 微信自动路（复刻 StartRecordFrom）在没捕获会话参数时发不出去（"第一次捕捉不到"）
  * v5.1: 微信宿主双路 —— ① 会话参数齐 → 全自动；② 缺参数 → 装填 AudioQueue 替换缓存,
@@ -1523,7 +1529,11 @@ static UIImage *TTSLoadBallImage(void) {
     /* v1 QQ: 面板状态 = 捕捉就绪状态 */
     id readyObj = nil;
     @synchronized([NSObject class]) { readyObj = g_qqSenderHandler; }
-    if (readyObj) {
+    if (g_isWeChatHost) {
+        self.statusLabel.text = (WXChainHasSession()
+            ? @"就绪：输入文字点合成（微信自动发送）"
+            : @"就绪：输入文字点合成（微信按住说话发送）");
+    } else if (readyObj) {
         self.statusLabel.text = @"就绪：输入文字点合成（发到当前会话）";
     } else {
         self.statusLabel.text = @"先在QQ发任意消息(文字/图)完成捕捉";
@@ -2209,12 +2219,14 @@ static NSString *qwEmoInstruction(NSString *display) {
             } @catch (NSException *e) { TTLog(@"[qq] 主动调用异常 %@", e); }
         } else if (!peer) TTLog(@"[qq] peer 为空，先发一条消息");
     }
-    if (!handler) {
+    if (!g_isWeChatHost && !handler) {
         self.statusLabel.text = @"先在QQ发任意消息(文字/图)完成捕捉";
         TTLog(@"[qq] sendDirect 无 handler，msgService=%p peer=%p",
               (__bridge void*)g_qqMsgService, (__bridge void*)g_qqLastPeer);
         return;
     }
+    BOOL isWXHost = g_isWeChatHost || WXChainIsWeChatBundle();   /* v5.2: 实时兜底判断 */
+    TTLog(@"[qq] sendDirect host=%s (flag=%d)", isWXHost ? "WECHAT" : "QQ", g_isWeChatHost ? 1 : 0);
 
     [self.input resignFirstResponder];
     self.send.enabled = NO;
@@ -2267,7 +2279,7 @@ static NSString *qwEmoInstruction(NSString *display) {
              * 改走已验证可行路径: 我们的 PCM 顶替 QQ 录音数据 → QQ 自己编码/自己发送 */
             {
                 double sec = (double)pcm.length / 2.0 / (double)g_targetSampleRate;
-                if (g_isWeChatHost) {
+                if (isWXHost) {
                     /* v5.1 微信宿主双路：
                      *   ① 会话参数齐（曾按住说话捕获过）→ 全自动（复刻 StartRecord/StopRecord）
                      *   ② 没有会话参数 → 手动注入路（装填替换缓存, 用户按住说话, 微信自己编码发送,
@@ -2816,7 +2828,7 @@ static void QQFloatV2Init(void) {
     g_isWeChatHost = WXChainIsWeChatBundle();
     if (g_isWeChatHost) {
         /* 微信宿主：不装 QQ hooks（类都不存在）；微信链 hooks 在启动通知 +3s 后安装 */
-        TTLog(@"QQFloat v5.1 init — 微信宿主（自动发送 / 无会话参数时手动注入）");
+        TTLog(@"QQFloat v5.2 init — **微信宿主**（自动发送 / 无会话参数时手动注入）");
         return;
     }
     InstallCodecHook();

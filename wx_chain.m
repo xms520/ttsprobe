@@ -736,9 +736,15 @@ void WXChainInstallHooks(void) {
 }
 
 BOOL WXChainIsWeChatBundle(void) {
+    /* ① bundleId（最可靠） */
     NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-    if (!bid.length) return NO;
     if ([bid hasPrefix:@"com.tencent.xin"]) return YES;   /* 微信 */
+    if ([bid hasPrefix:@"com.tencent.mqq"] ||
+        [bid hasPrefix:@"com.tencent.qq"])  return NO;    /* QQ */
+    /* ② bundleId 早期读不到时按类兜底（dylib 加载早期 NSBundle 可能还没就绪） */
+    if (NSClassFromString(@"QQPttRecordBtn") || NSClassFromString(@"QQMsgService")) return NO;
+    if (NSClassFromString(@"CMessageMgr") || NSClassFromString(@"MMServiceCenter") ||
+        NSClassFromString(@"CMessageWrap")) return YES;
     return NO;
 }
 
