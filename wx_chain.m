@@ -24,6 +24,8 @@ BOOL WXChainIsWeChatBundle(void);
 void WXChainSetLogPath(NSString *p);
 void WXChainInstallHooks(void);
 void WXChainSendWithPcm(NSData *pcm, void (^status)(NSString *text));
+BOOL WXChainHasSession(void);
+void WXChainArmInjectionWithPcm(NSData *pcm);
 
 static NSString *g_wxLogPath = nil;
 void WXChainSetLogPath(NSString *p) { g_wxLogPath = [p copy]; }
@@ -409,8 +411,9 @@ static void WXAQInputTrampoline(void *inUserData, AudioQueueRef inAQ,
             } else {
                 memset(inBuffer->mAudioData, 0, bufSz);
                 if (!g_wxPcmFedDone) {
-                    g_wxPcmFedDone = YES;   /* 喂完标记（TTS 数据已全部进入管线） */
-                    WXLog(@"[aq-replace] PCM 全部喂完 — 静音帧（cb=%lu）", (unsigned long)g_wxAqCbSeq);
+                    g_wxPcmFedDone = YES;      /* 喂完标记（自动发送的 StopRecord 时机依据） */
+                    g_wxReplaceActive = NO;    /* v5.1: 立刻关替换 → 再录音就是真实麦克风 */
+                    WXLog(@"[wx-inject] PCM 全部喂完 — 已关闭替换（cb=%lu）", (unsigned long)g_wxAqCbSeq);
                 }
             }
             /* 每次回调都记录（seq/size/dt/est-rate/fed/total） */
@@ -737,4 +740,50 @@ BOOL WXChainIsWeChatBundle(void) {
     if (!bid.length) return NO;
     if ([bid hasPrefix:@"com.tencent.xin"]) return YES;   /* 微信 */
     return NO;
+}
+
+/* ==================== v5.1: 手动注入路（不依赖任何会话参数） ====================
+ * 自动路要 StartRecordFrom 的 from/to/userInfo；没捕获到就发不出去。
+ * 这一路只用已装好的 AudioQueue trampoline：
+ *   装填 PCM → 用户自己在聊天里按住说话（微信真实录音 UI）→ buffer 被替换成 TTS
+ *   → 松手 → 微信自己的完整发送链把语音条发到当前会话。
+ * 全程不需要 from/to/userInfo，也不需要面板调任何微信内部方法。 */
+void WXChainArmInjectionWithPcm(NSData *pcm) {
+    if (!pcm.length) return;
+    @synchronized([NSObject class]) {
+        g_wxPendingPCM = pcm;
+        g_wxPcmOffset = 0;
+        g_wxReplaceActive = YES;
+        g_wxPcmFedDone = NO;
+        g_wxAqLastNs = 0; g_wxAqRateBps = 0; g_wxAqCbSeq = 0; g_wxAqStartNs = 0;
+        g_wxAqFormatLogged = NO;
+    }
+    NSUInteger ms = pcm.length * 1000 / (NSUInteger)(g_wxTargetSampleRate * 2);
+    WXLog(@"[wx-inject] 装填 %luB ≈ %lums — 等待用户按住说话（无需会话参数）",
+          (unsigned long)pcm.length, (unsigned long)ms);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        NSUInteger off = 0;
+        @synchronized([NSObject class]) { off = g_wxPcmOffset; }
+        if (g_wxReplaceActive && off == 0) {
+            @synchronized([NSObject class]) { g_wxReplaceActive = NO; g_wxPendingPCM = nil; }
+            WXLog(@"[wx-inject] 60s 未使用 → 已自动撤销");
+        }
+    });
+}
+
+/* 会话参数是否齐（齐了才能走全自动 StartRecordFrom 路） */
+BOOL WXChainHasSession(void) {
+    NSString *peer = nil; id from = nil; id info = nil;
+    @synchronized([NSObject class]) {
+        peer = [g_wxLastToUsr copy];
+        from = g_wxLastFrom;
+        info = g_wxLastUserInfo;
+    }
+    if (!peer.length) peer = [NSUserDefaults.standardUserDefaults stringForKey:kSessionToKey];
+    if (!from || ![from isKindOfClass:[NSString class]] || ![from length])
+        from = [NSUserDefaults.standardUserDefaults stringForKey:kSessionFromKey];
+    if (!info) info = WXLoadSessionInfo();
+    if (!peer.length || !from || ![from length] || !info) return NO;
+    return YES;
 }

@@ -13,6 +13,11 @@
  *   4. OWN 路: 自己 alloc 对照(预期 voice=0)
  *   胜出路全量编码
  *
+ * ===== v5.1（微信侧补手动注入路）=====
+ * v5.0 实测: 微信自动路（复刻 StartRecordFrom）在没捕获会话参数时发不出去（"第一次捕捉不到"）
+ * v5.1: 微信宿主双路 —— ① 会话参数齐 → 全自动；② 缺参数 → 装填 AudioQueue 替换缓存,
+ *       用户按住说话, 微信自己的录音管线把 TTS 编码发送（不需要 from/to/userInfo）
+ *       且喂完自动关替换（不影响后续真实录音）+ 60s 未使用自动撤销
  * ===== v5.0（双宿主：QQ + 微信同一个 dylib）=====
  * 并入 TTSFloat_v30 的微信发送链（独立编译单元 wx_chain.m）：
  *   微信宿主: 面板「合成语音」→ 装填 PCM + 复刻微信自己的 StartRecordFrom:ToUser:UserInfo:
@@ -173,6 +178,8 @@ BOOL WXChainIsWeChatBundle(void);
 void WXChainSetLogPath(NSString *p);
 void WXChainInstallHooks(void);
 void WXChainSendWithPcm(NSData *pcm, void (^status)(NSString *text));
+BOOL WXChainHasSession(void);
+void WXChainArmInjectionWithPcm(NSData *pcm);
 
 static BOOL g_isWeChatHost = NO;
 
@@ -2261,23 +2268,34 @@ static NSString *qwEmoInstruction(NSString *display) {
             {
                 double sec = (double)pcm.length / 2.0 / (double)g_targetSampleRate;
                 if (g_isWeChatHost) {
-                    /* v5.0 微信宿主：交给微信链 —— 复刻 StartRecord/StopRecord 全自动发送 */
-                    TTLog(@"[qq] v5.0 微信宿主 → 微信链自动发送: %luB ≈ %.2fs",
-                          (unsigned long)pcm.length, sec);
+                    /* v5.1 微信宿主双路：
+                     *   ① 会话参数齐（曾按住说话捕获过）→ 全自动（复刻 StartRecord/StopRecord）
+                     *   ② 没有会话参数 → 手动注入路（装填替换缓存, 用户按住说话, 微信自己编码发送,
+                     *      完全不需要 from/to/userInfo） */
+                    BOOL hasSession = WXChainHasSession();
+                    TTLog(@"[qq] v5.1 微信宿主: %luB ≈ %.2fs 自动路=%s",
+                          (unsigned long)pcm.length, sec, hasSession ? "可用" : "缺会话参数→手动路");
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        self.send.enabled = NO;
-                        [self.spinner startAnimating];
-                        self.statusLabel.text = @"自动发送中…";
-                        WXChainSendWithPcm(pcm, ^(NSString *t) {
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                self.statusLabel.text = t ?: @"";
-                                BOOL term = ([t hasPrefix:@"✅"] || [t hasPrefix:@"⚠️"] ||
-                                             [t hasPrefix:@"先"] || [t hasPrefix:@"发送器"] ||
-                                             [t hasPrefix:@"录音会话"] || [t hasPrefix:@"PCM"]);
-                                if (term) { self.send.enabled = YES; [self.spinner stopAnimating]; }
-                                if ([t hasPrefix:@"✅"]) self.input.text = @"";
+                        if (hasSession) {
+                            self.send.enabled = NO;
+                            [self.spinner startAnimating];
+                            self.statusLabel.text = @"自动发送中…";
+                            WXChainSendWithPcm(pcm, ^(NSString *t) {
+                                dispatch_async(dispatch_get_main_queue(), ^{
+                                    self.statusLabel.text = t ?: @"";
+                                    BOOL term = ([t hasPrefix:@"✅"] || [t hasPrefix:@"⚠️"] ||
+                                                 [t hasPrefix:@"先"] || [t hasPrefix:@"发送器"] ||
+                                                 [t hasPrefix:@"录音会话"] || [t hasPrefix:@"PCM"]);
+                                    if (term) { self.send.enabled = YES; [self.spinner stopAnimating]; }
+                                    if ([t hasPrefix:@"✅"]) self.input.text = @"";
+                                });
                             });
-                        });
+                        } else {
+                            WXChainArmInjectionWithPcm(pcm);
+                            self.send.enabled = YES; [self.spinner stopAnimating];
+                            self.statusLabel.text = [NSString stringWithFormat:
+                                @"✔ 已合成 %.1f 秒 → 回聊天按住说话约 %.1f 秒后松手", sec, sec];
+                        }
                     });
                     return;
                 }
@@ -2798,7 +2816,7 @@ static void QQFloatV2Init(void) {
     g_isWeChatHost = WXChainIsWeChatBundle();
     if (g_isWeChatHost) {
         /* 微信宿主：不装 QQ hooks（类都不存在）；微信链 hooks 在启动通知 +3s 后安装 */
-        TTLog(@"QQFloat v5.0 init — 微信宿主（微信链自动发送）");
+        TTLog(@"QQFloat v5.1 init — 微信宿主（自动发送 / 无会话参数时手动注入）");
         return;
     }
     InstallCodecHook();
