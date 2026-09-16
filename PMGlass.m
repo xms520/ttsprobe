@@ -59,6 +59,23 @@ static int g_dump_done = 0, g_probe_done = 0;  // 一次性动作防重入
 static FILE* g_log = NULL;
 #define LOG(...) do { if (g_log) { fprintf(g_log, __VA_ARGS__); fflush(g_log); } } while(0)
 
+// ═══ v33 极早期崩溃日志（不依赖 getenv/NSBundle/FILE*，用裸 open/write —— 启动最早期唯一可靠路径）═══
+static int g_diag_fd = -1;
+static void diag_open(void) {
+    if (g_diag_fd >= 0) return;
+    const char* h = getenv("HOME");
+    char p[512];
+    if (h) snprintf(p, sizeof(p), "%s/Documents/crash_diag.log", h);
+    else   snprintf(p, sizeof(p), "/tmp/crash_diag.log");
+    g_diag_fd = open(p, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+}
+#define DIAG(...) do { \
+    char _b[256]; int _n = snprintf(_b, sizeof(_b), __VA_ARGS__); \
+    if (_n > 0) { if (g_diag_fd < 0) diag_open(); \
+        if (g_diag_fd >= 0) { write(g_diag_fd, _b, (size_t)(_n > (int)sizeof(_b) ? (int)sizeof(_b) : _n)); \
+            fsync(g_diag_fd); } } \
+} while(0)
+
 extern uint32_t _dyld_image_count(void);
 extern const char* _dyld_get_image_name(uint32_t image_index);
 
@@ -67,6 +84,7 @@ extern const char* _dyld_get_image_name(uint32_t image_index);
 static void find_uf(void) {
     if (g_uf) return;
     uint32_t n = _dyld_image_count();
+    DIAG("[find_uf] count=%u\n", n);
     static int scanned = 0;
     int idx = 0;
     for (uint32_t i = 0; i < n; i++) {
@@ -243,7 +261,9 @@ static void* g_main_pthread = NULL;
 static int find_named_main_thread(void) {
     mach_port_t *threads = NULL;
     mach_msg_type_number_t count = 0;
+    DIAG("[rl] task_threads call\n");
     kern_return_t kr = task_threads(mach_task_self(), &threads, &count);
+    DIAG("[rl] task_threads kr=%d count=%u\n", kr, count);
     if (kr != 0 || !threads) {
         LOG("rl task_threads kr=%d count=%u\n", kr, count);
         return 0;
@@ -296,9 +316,11 @@ static int init_runloop_bridge(void) {
 
     void* cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
     if (!cf) {
+        DIAG("[rl] dlopen CF fail\n");
         LOG("rl-nocf\n");
         return 0;
     }
+    DIAG("[rl] dlopen CF ok\n");
 
     p_CFRunLoopGet0 = (void*)dlsym(cf, "_CFRunLoopGet0");
     if (!p_CFRunLoopGet0)
@@ -615,6 +637,7 @@ static void install_beat(void) {
 
 static void* worker(void* a) {
     (void)a;
+    DIAG("[worker] enter\n");
     // v13: 清掉上次会话残留的开关文件（v12 日志实锤：新启动 flag: god=1 是上次点的状态复活）
     {
         const char* ph0 = getenv("HOME");
@@ -625,6 +648,7 @@ static void* worker(void* a) {
     }
     int hb = 0;
     for (int i = 0; i < 1440; i++) {
+        if (i == 0) DIAG("[worker] loop begin\n");
         if (!g_uf) find_uf();
         if (g_uf) resolve_syms();
         if (g_uf && !g_L && i > 4) try_get_lua();
@@ -634,6 +658,7 @@ static void* worker(void* a) {
         if (i % 10 == 0) {
             LOG("hb%d imgs=%u uf=%p L=%p\n", hb++, _dyld_image_count(), g_uf, g_L);
         }
+        if (i % 10 == 0) DIAG("[worker] hb%d uf=%p L=%p\n", i / 10, (void*)g_uf, (void*)g_L);
         usleep(500000);
     }
 
@@ -1303,13 +1328,19 @@ extern const char* _dyld_get_image_name(uint32_t);
 
 __attribute__((constructor)) static void fg_ctor() {
     @autoreleasepool {
+        // v33: 极早期断点——任何一步崩都能定位
+        diag_open();
+        DIAG("[ctor] enter\n");
         const char* homeC = getenv("HOME");
+        DIAG("[ctor] home=%s\n", homeC ? homeC : "(null)");
         char lp[512];
         snprintf(lp, sizeof(lp), "%s/Documents/sys_cache.log", homeC ? homeC : "/var/mobile");
         g_log = fopen(lp, "w");
-        LOG("v32 pid=%d\n", getpid());
+        DIAG("[ctor] g_log=%p fopen rc\n", (void*)g_log);
+        LOG("v33 pid=%d\n", getpid());
 
         NSString *bid = NSBundle.mainBundle.bundleIdentifier;
+        DIAG("[ctor] bid=%s\n", bid ? bid.UTF8String : "(null)");
         if (!bid) { LOG("no bundle id\n"); return; }
         if (fg_shouldSkip(bid)) {
             LOG("skip blacklist app: %s\n", bid.UTF8String);
@@ -1320,12 +1351,15 @@ __attribute__((constructor)) static void fg_ctor() {
 
         // v6：v45 原版 worker（pthread：探测→runloop桥→install→ping 自愈→flags 读）
         pthread_t t;
-        pthread_create(&t, NULL, worker, NULL);
+        int pcr = pthread_create(&t, NULL, worker, NULL);
+        DIAG("[ctor] pthread_create rc=%d\n", pcr);
         pthread_detach(t);
+        DIAG("[ctor] after pthread_detach\n");
 
         // App 启动后再挂 UI（构造函数早于 UIApplicationMain，需延迟）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
+            DIAG("[ui] dispatch enter\n");
             fg_toast(@"已就绪");
             fg_ensureButton();
             [NSNotificationCenter.defaultCenter
@@ -1338,5 +1372,6 @@ __attribute__((constructor)) static void fg_ctor() {
                             else fg_ensureButton();
                         }];
         });
+        DIAG("[ctor] done\n");
     }
 }
