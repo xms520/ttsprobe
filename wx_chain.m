@@ -609,7 +609,7 @@ void WXChainSendWithPcm(NSData *pcm, void (^status)(NSString *)) {
     void (^say)(NSString *) = ^(NSString *t) { if (status && t) status(t); };
     if (!pcm.length) { say(@"PCM 为空"); return; }
 
-    id audioSender = nil; NSString *peer = nil; id myWxid = nil; id userInfo = nil;
+    id audioSender = nil; NSString *peer = nil; NSString *myWxid = nil; id userInfo = nil;
     @synchronized([NSObject class]) {
         peer = [g_wxLastToUsr copy];
         myWxid = g_wxLastFrom;
