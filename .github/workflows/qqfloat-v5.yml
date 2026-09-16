@@ -1,0 +1,54 @@
+name: build-qqfloat-v5
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - "QQFloat_v5.m"
+      - "wx_chain.m"
+      - ".github/workflows/qqfloat-v5.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid || true
+
+      - name: Generate embedded resources (avatar + tip QR)
+        run: python3 build_res.py
+
+      - name: Build dual-host dylib (QQFloat_v5 + wx_chain + fishhook)
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-abi-version=2 \
+            -Oz -fvisibility=hidden \
+            -fno-stack-protector \
+            -Xlinker -S -Xlinker -x -Xlinker -dead_strip \
+            -dynamiclib \
+            -framework Foundation -framework UIKit -framework AVFoundation \
+            -framework CoreGraphics -framework AudioToolbox \
+            -o QQFloat_v5.dylib \
+            QQFloat_v5.m wx_chain.m fishhook.c
+
+      - name: Fake-sign with ldid
+        run: ldid -S QQFloat_v5.dylib || true
+
+      - name: Show result
+        run: |
+          ls -la QQFloat_v5.dylib
+          file QQFloat_v5.dylib
+          md5 QQFloat_v5.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QQFloat-v5-dylib
+          path: QQFloat_v5.dylib
