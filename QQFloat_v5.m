@@ -19,6 +19,11 @@
  * v5.2: ① 该检查改为 !g_isWeChatHost 才生效; ② 面板文案按宿主区分(微信显示"点合成（微信自动发送/按住说话发送）")
  *       ③ 宿主判断加类兜底(CMessageMgr/MMServiceCenter/CMessageWrap→微信; QQPttRecordBtn/QQMsgService→QQ)
  *       ④ sendDirect 打印 [qq] sendDirect host=WECHAT/QQ 便于确认
+ * ===== v5.8（音色收敛到已授权集 + 灿灿接情绪）=====
+ * 真机日志判决: 11 音色中仅灿灿 code=3000，其余 10 个 code=3001 requested resource not granted
+ *   → 火山音色需在控制台「语音合成大模型→音色管理」单独添加授权（多数免费）
+ * v5.8: ① 音色表只保留灿灿（未授权的注释保留在源码里，授权后即扩表）
+ *       ② 灿灿是多情感音色 → 情绪标签条接入（生气/快乐/兴奋/悲伤/恐惧/惊讶/委屈/嘲讽 → 火山 emotion）
  * ===== v5.6（第三后端换火山引擎豆包 TTS）=====
  * 本地音色后端已删除（用户要求）；backend=2 = 火山引擎豆包大模型 TTS（volctts.m）
  *   appid+token 编译时 XOR 0x3C 内置；POST openspeech.bytedance.com/api/v1/tts → base64 MP3 → 原发送链
@@ -218,7 +223,8 @@ NSString *VolcVoiceDisplay(NSUInteger i);
 NSString *VolcVoiceID(NSUInteger i);
 NSString *VolcDisplayForID(NSString *vid);
 void VolcSetLogPath(NSString *p);
-void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, void (^done)(NSData *audio, NSError *error));
+void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, NSString *emotion, void (^done)(NSData *audio, NSError *error));
+NSString *VolcEmotionForDisplay(NSString *disp);
 
 static NSString *g_volcVoice = @"zh_female_cancan_mars_bigtts";
 static NSString *const kVolcVoiceKey = @"TTSFloatVolcVoice";
@@ -2518,8 +2524,9 @@ static NSString *qwEmoInstruction(NSString *display) {
 
     if (g_backend == 2) {
         /* v5.5: 本地系统语音（离线）——WAV 回调走同一 onAudio 管线 */
-        TTLog(@"[volc] 请求 voice=%@ rate=%.2f len=%lu", g_volcVoice, g_qwenRate, (unsigned long)text.length);
-        RequestVolcTTS(text, g_volcVoice, g_qwenRate, onAudio);
+        NSString *emo = VolcEmotionForDisplay(g_qwenInstr);   /* v5.8: 情绪标签 → 火山 emotion */
+        TTLog(@"[volc] 请求 voice=%@ rate=%.2f emo=%@ len=%lu", g_volcVoice, g_qwenRate, emo ?: @"-", (unsigned long)text.length);
+        RequestVolcTTS(text, g_volcVoice, g_qwenRate, emo, onAudio);
     } else if (g_backend == 1) {
         RequestQwenTTS(text, g_qwenVoice, g_qwenRate, qwEmoInstruction(g_qwenInstr), onAudio);
     } else {
@@ -2917,7 +2924,7 @@ static void QQFloatV2Init(void) {
     g_isWeChatHost = WXChainIsWeChatBundle();
     if (g_isWeChatHost) {
         /* 微信宿主：不装 QQ hooks（类都不存在）；微信链 hooks 在启动通知 +3s 后安装 */
-        TTLog(@"QQFloat v5.6 init — **微信宿主**（+火山豆包后端）");
+        TTLog(@"QQFloat v5.8 init — **微信宿主**（豆包·灿灿+情绪）");
         return;
     }
     InstallCodecHook();

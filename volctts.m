@@ -10,20 +10,26 @@ NSString *VolcVoiceDisplay(NSUInteger i);
 NSString *VolcVoiceID(NSUInteger i);
 NSString *VolcDisplayForID(NSString *vid);
 void VolcSetLogPath(NSString *p);
-void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, void (^done)(NSData *audio, NSError *error));
+void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, NSString *emotion, void (^done)(NSData *audio, NSError *error));
+
+/* 情绪标签（中文显示名）→ 火山 emotion；不支持的返回 nil（不带情绪字段） */
+NSString *VolcEmotionForDisplay(NSString *disp) {
+    if (!disp.length) return nil;
+    static NSDictionary *m = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        m = @{@"生气":@"angry", @"愤怒":@"angry", @"快乐":@"happy", @"开心":@"happy",
+              @"兴奋":@"excitement", @"激动":@"excitement", @"悲伤":@"sad", @"难过":@"sad",
+              @"恐惧":@"fear", @"害怕":@"fear", @"惊讶":@"surprise",
+              @"委屈":@"pity", @"嘲讽":@"hate"};
+    });
+    return m[disp];
+}
 
 static NSString *const g_volcVoiceTable[][2] = {
     {@"豆包·灿灿(女·多情感)",  @"zh_female_cancan_mars_bigtts"},
-    {@"豆包·湾湾小何(女)",     @"zh_female_wanwanxiaohe_mars_bigtts"},
-    {@"豆包·魅力女友(女)",     @"zh_female_meilinvyou_mars_bigtts"},
-    {@"豆包·爽快思思(女)",     @"zh_female_shuangkuai_mars_bigtts"},
-    {@"豆包·邻家姐姐(女)",     @"zh_female_linjialimei_mars_bigtts"},
-    {@"豆包·北京小爷(男)",     @"zh_male_beijingxiaoye_mars_bigtts"},
-    {@"豆包·儒雅青年(男)",     @"zh_male_ruishiniandai_mars_bigtts"},
-    {@"豆包·沉稳青年(男)",     @"zh_male_M392_conversation_wvae"},
-    {@"豆包·元气小男孩",       @"zh_male_yuanqiyouxia_mars_bigtts"},
-    {@"豆包·通用女声",         @"BV001_stream"},
-    {@"豆包·通用男声",         @"BV002_stream"},
+    /* ⚠️ 以下音色需在火山控制台「语音合成大模型→音色管理」添加授权后才能用（code=3001）:
+       湾湾小何/魅力女友/爽快思思/邻家姐姐/北京小爷/儒雅青年/沉稳青年/元气小男孩/BV001/BV002 */
 };
 #define VOLC_VOICE_COUNT (sizeof(g_volcVoiceTable) / sizeof(g_volcVoiceTable[0]))
 
@@ -67,7 +73,7 @@ static NSString *VolcXor(NSString *hex) {
 static NSString *VolcToken(void)  { return VolcXor(@"5f72480a58655e780e585b7a63080c4d755e490c5b6f527350044e7b567f580f"); }
 static NSString *VolcAppID(void)  { return VolcXor(@"05080f080a0a0e050a0b"); }
 
-void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, void (^done)(NSData *audio, NSError *error)) {
+void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, NSString *emotion, void (^done)(NSData *audio, NSError *error)) {
     if (!text.length) { if (done) done(nil, [NSError errorWithDomain:@"volc" code:1
         userInfo:@{NSLocalizedDescriptionKey:@"文本为空"}]); return; }
     NSString *appid = VolcAppID(), *token = VolcToken();
@@ -84,18 +90,23 @@ void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, void (^done)(
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:[NSString stringWithFormat:@"Bearer; %@", token] forHTTPHeaderField:@"Authorization"];
     double sr = MIN(2.0, MAX(0.5, (double)rate));
+    NSMutableDictionary *audio = [NSMutableDictionary dictionaryWithDictionary:
+        @{@"voice_type": voiceID ?: @"zh_female_cancan_mars_bigtts",
+          @"encoding": @"mp3", @"speed_ratio": @(sr)}];
+    if (emotion.length) {   /* v5.8: 灿灿多情感 */
+        audio[@"emotion"] = emotion;
+        audio[@"enable_emotion"] = @YES;
+    }
     NSDictionary *body = @{
         @"app":  @{@"appid": appid, @"token": token, @"cluster": @"volcano_tts"},
         @"user": @{@"uid": @"qqfloat"},
-        @"audio":@{@"voice_type": voiceID ?: @"zh_female_cancan_mars_bigtts",
-                   @"encoding": @"mp3",
-                   @"speed_ratio": @(sr)},
+        @"audio": audio,
         @"request":@{@"reqid": [[NSUUID UUID] UUIDString],
                      @"text": text, @"text_type": @"plain", @"operation": @"query"}
     };
     NSError *jerr = nil;
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:&jerr];
-    VolcLog(@"POST voice=%@ rate=%.2f 文本%lu字", voiceID, rate, (unsigned long)text.length);
+    VolcLog(@"POST voice=%@ rate=%.2f emo=%@ 文本%lu字", voiceID, rate, emotion ?: @"-", (unsigned long)text.length);
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (err) { VolcLog(@"网络失败 %@", err.localizedDescription);
