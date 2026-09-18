@@ -82,7 +82,8 @@ NSString *LocalVoiceDisplay(NSUInteger i) {
 NSString *LocalVoiceID(NSUInteger i) {
     LocalLoadVoices();
     if (i >= g_lcVoices.count) return nil;
-    return g_lcVoices[i].identifier;
+    AVSpeechSynthesisVoice *v = g_lcVoices[i];
+    return v.identifier;
 }
 NSString *LocalDisplayForID(NSString *vid) {
     LocalLoadVoices();
@@ -148,7 +149,7 @@ void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)
             @try {
                 AVAudioFormat *inf = fmt0;
                 AVAudioFrameCount cap = totalFrames + 4096;
-                AVAudioPCMBuffer *inBuf = [[AVAudioPCMBuffer alloc] initWithFormat:inf frameCapacity:cap];
+                AVAudioPCMBuffer *inBuf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:inf frameCapacity:cap];
                 float *dst0 = inBuf.floatChannelData[0];
                 AVAudioFrameCount off = 0;
                 for (NSData *c in chunks) {
@@ -159,14 +160,14 @@ void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)
 
                 AVAudioFormat *outFmt = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:16000 channels:1];
                 AVAudioConverter *conv = [[AVAudioConverter alloc] initFromFormat:inf toFormat:outFmt];
-                AVAudioPCMBuffer *outBuf = [[AVAudioPCMBuffer alloc] initWithFormat:outFmt
+                AVAudioPCMBuffer *outBuf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:outFmt
                     frameCapacity:(AVAudioFrameCount)(totalFrames * 16000.0 / inf.sampleRate) + 8192];
                 __block BOOL fed = NO;
                 NSError *cerr = nil;
                 [conv convertToBuffer:outBuf error:&cerr withInputFromBlock:
-                 ^AVAudioBuffer * _Nullable(AVAudioConverterInputStatus *status, AVAudioFrameCount *ioFrames) {
-                     if (!fed) { fed = YES; return inBuf; }
-                     *status = AVAudioConverterInputStatus_EndOfStream;
+                 ^AVAudioBuffer *(AVAudioPacketCount pk, AVAudioConverterInputStatus *st) {
+                     if (!fed) { fed = YES; *st = AVAudioConverterInputStatus_HaveData; return inBuf; }
+                     *st = AVAudioConverterInputStatus_NoDataNow;
                      return nil;
                  }];
                 if (cerr || !outBuf || outBuf.frameLength == 0) {
