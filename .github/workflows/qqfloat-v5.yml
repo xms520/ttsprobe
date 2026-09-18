@@ -36,7 +36,7 @@ jobs:
             -framework Foundation -framework UIKit -framework AVFoundation \
             -framework CoreGraphics -framework AudioToolbox \
             -o QQFloat_v5.dylib \
-            QQFloat_v5.m wx_chain.m fishhook.c
+            QQFloat_v5.m wx_chain.m edge_tts.m fishhook.c
 
       - name: Fake-sign with ldid
         run: ldid -S QQFloat_v5.dylib || true

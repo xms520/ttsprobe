@@ -19,6 +19,14 @@
  * v5.2: ① 该检查改为 !g_isWeChatHost 才生效; ② 面板文案按宿主区分(微信显示"点合成（微信自动发送/按住说话发送）")
  *       ③ 宿主判断加类兜底(CMessageMgr/MMServiceCenter/CMessageWrap→微信; QQPttRecordBtn/QQMsgService→QQ)
  *       ④ sendDirect 打印 [qq] sendDirect host=WECHAT/QQ 便于确认
+ * ===== v5.4（第三 TTS 后端：edge-tts 微软免费接口）=====
+ * 用户提供的 edge-tts-gui-rust v0.16.2.exe 静态扫描确认协议参数（与我们实现一致）:
+ *   wss://speech.platform.bing.com/.../readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4
+ *   + Sec-MS-GEC(SHA256(filetime 5min粒度+token) 大写hex) + Sec-MS-GEC-Version=1-130.0.2849.68
+ *   文本帧 speech.config + ssml；二进制帧 [u16BE hdrLen][hdr][mp3]；turn.end 结束
+ * 新编译单元 edge_tts.m: 14 音色（普通话/东北/陕西/粤语/台湾/英/日）+ 语速（复用千问滑杆, 语气指令不生效）
+ *   输出 MP3 24kHz → 主单元 DecodeToPCM → 16k PCM → 原发送链（QQ 注入 / 微信双路）
+ *   backend=2 持久化（kBackendKey=2 + TTSFloatEdgeVoice）
  * ===== v5.3（修微信三连闪退：end-obs hook 的 ARC 返回语义）=====
  * v5.2 实测（QQFloat_6.log）：三次崩溃全部精确停在 [WXCHAIN] [end-obs] OnRecorderEndRecording: 之后
  *   [CRASH] sig=11 addr=0x20 ×2 —— OnRecorderEndRecording: 是 v24@0:8@16 (void)，
@@ -193,6 +201,21 @@ void WXChainInstallHooks(void);
 void WXChainSendWithPcm(NSData *pcm, void (^status)(NSString *text));
 BOOL WXChainHasSession(void);
 void WXChainArmInjectionWithPcm(NSData *pcm);
+
+/* ===== v5.4 第三后端：edge-tts（微软免费，edge_tts.m 提供） ===== */
+NSUInteger EdgeVoiceCount(void);
+NSString *EdgeVoiceDisplay(NSUInteger i);
+NSString *EdgeVoiceID(NSUInteger i);
+NSString *EdgeDisplayForID(NSString *vid);
+void EdgeSetLogPath(NSString *p);
+void RequestEdgeTTS(NSString *text, NSString *voiceID, float rate, void (^done)(NSData *audio, NSError *error));
+
+static NSString *g_edgeVoice = @"zh-CN-XiaoxiaoNeural";
+static NSString *const kEdgeVoiceKey = @"TTSFloatEdgeVoice";
+static void EdgeSaveVoice(NSString *vid) {
+    g_edgeVoice = vid ?: @"zh-CN-XiaoxiaoNeural";
+    [NSUserDefaults.standardUserDefaults setObject:g_edgeVoice forKey:kEdgeVoiceKey];
+}
 
 static BOOL g_isWeChatHost = NO;
 
@@ -596,7 +619,9 @@ static NSString *QwenDisplayFromID(NSString *vid) {
 static void QwenLoadState(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     NSInteger b = [d integerForKey:kBackendKey];
-    g_backend = (b == 1) ? 1 : 0;
+    g_backend = (b == 2) ? 2 : ((b == 1) ? 1 : 0);   /* v5.4: 0=原接口 1=千问 2=Edge */
+    NSString *ev = [d stringForKey:kEdgeVoiceKey];
+    if (ev.length) g_edgeVoice = ev;
     NSString *v = [d stringForKey:kQwenVoiceKey];
     if (v.length) g_qwenVoice = v;
     double r = [d doubleForKey:kQwenRateKey];
@@ -1547,7 +1572,9 @@ static UIImage *TTSLoadBallImage(void) {
     }
 
     /* 音色异步加载完成后刷新标题（v30: 千问后端直接显示，不等原接口） */
-    if (g_backend == 1) {
+    if (g_backend == 2) {
+        self.voiceLabel.text = [NSString stringWithFormat:@"[Edge] %@ %.2fx", EdgeDisplayForID(g_edgeVoice), g_qwenRate];
+    } else if (g_backend == 1) {
         self.voiceLabel.text = [NSString stringWithFormat:@"[千问] %@ %.2fx%@",
             g_qwenVoice, g_qwenRate, g_qwenInstr.length ? [NSString stringWithFormat:@" ·%@", g_qwenInstr] : @""];
     } else if (g_voices.count) {
@@ -1692,7 +1719,7 @@ static UIImage *TTSLoadBallImage(void) {
     NSUInteger n = g_voices.count;
     NSString *title;
     if (g_backend == 1) {
-        title = [NSString stringWithFormat:@"选择音色（千问48 + 原%lu）", (unsigned long)n];
+        title = [NSString stringWithFormat:@"选择音色（千问48 + Edge%lu + 原%lu）", (unsigned long)EdgeVoiceCount(), (unsigned long)n];
     } else {
         title = n ? [NSString stringWithFormat:@"选择音色（千问48 + 原%lu）", (unsigned long)n]
                   : (g_voiceFetchState < 0 ? @"原接口加载失败，千问可用" : @"选择音色（千问48 + 原加载中…）");
@@ -2012,7 +2039,7 @@ static NSString *qwEmoInstruction(NSString *display) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return g_voiceFilter ? 1 : 2;   /* v30: 搜索时单段；平时 千问段 + 原接口段 */
+    return g_voiceFilter ? 1 : 3;   /* v5.4: 搜索时单段；平时 千问段 + Edge段 + 原接口段 */
 }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
     if (g_voiceFilter) {
@@ -2020,11 +2047,13 @@ static NSString *qwEmoInstruction(NSString *display) {
         return (NSInteger)g_voiceFilter.count;
     }
     if (s == 0) return (NSInteger)QW_VOICE_COUNT;          /* 千问 48 */
+    if (s == 1) return (NSInteger)EdgeVoiceCount();        /* v5.4: Edge 音色 */
     return (NSInteger)(g_voices ?: @[]).count;             /* 原接口（可能还在加载） */
 }
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
     if (g_voiceFilter) return nil;
     if (s == 0) return @"千问（48 音色 · 支持语气/语速）";
+    if (s == 1) return @"Edge（微软免费 · 无需Key · 语速有效）";
     return [NSString stringWithFormat:@"原接口（%lu 音色）", (unsigned long)(g_voices ?: @[]).count];
 }
 /* v30: 显示名是否千问（"ID·中文名" 形态，按 ID 前缀判定） */
@@ -2040,18 +2069,24 @@ static NSString *qwEmoInstruction(NSString *display) {
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
     NSString *name = nil;
-    BOOL isQwen = NO;
-    NSUInteger qwIdx = 0;
+    BOOL isQwen = NO, isEdge = NO;
+    NSUInteger qwIdx = 0, edIdx = 0;
     if (g_voiceFilter) {
         if (ip.row >= (NSInteger)g_voiceFilter.count) { cell.textLabel.text = @""; return cell; }
         name = g_voiceFilter[ip.row];
+        isEdge = [name hasPrefix:@"Edge·"];
         isQwen = [self qwIsQwenDisplay:name];
+        if (isEdge) for (NSUInteger i = 0; i < EdgeVoiceCount(); i++) if ([name isEqualToString:EdgeVoiceDisplay(i)]) { edIdx = i; break; }
         if (isQwen) for (NSUInteger i = 0; i < QW_VOICE_COUNT; i++) if ([name hasPrefix:g_qwenVoices[i][0]]) { qwIdx = i; break; }
     } else if (ip.section == 0) {
         if (ip.row >= (NSInteger)QW_VOICE_COUNT) { cell.textLabel.text = @""; return cell; }
         qwIdx = (NSUInteger)ip.row;
         name = [NSString stringWithFormat:@"%@·%@", g_qwenVoices[qwIdx][0], g_qwenVoices[qwIdx][1]];
         isQwen = YES;
+    } else if (ip.section == 1) {
+        edIdx = (NSUInteger)ip.row;
+        name = EdgeVoiceDisplay(edIdx) ?: @"";
+        isEdge = YES;
     } else {
         NSArray *l = g_voices ?: @[];
         if (ip.row >= (NSInteger)l.count) { cell.textLabel.text = @""; return cell; }
@@ -2062,31 +2097,49 @@ static NSString *qwEmoInstruction(NSString *display) {
     cell.textLabel.font = [UIFont systemFontOfSize:14];
     cell.textLabel.textColor = UIColor.blackColor;
     BOOL selected;
-    if (isQwen) selected = (g_backend == 1 && [g_qwenVoices[qwIdx][0] isEqualToString:g_qwenVoice]);
-    else         selected = (g_backend == 0 && [name isEqualToString:TTSCurVoice()]);
+    if (isQwen)      selected = (g_backend == 1 && [g_qwenVoices[qwIdx][0] isEqualToString:g_qwenVoice]);
+    else if (isEdge) selected = (g_backend == 2 && [EdgeVoiceID(edIdx) isEqualToString:g_edgeVoice]);
+    else             selected = (g_backend == 0 && [name isEqualToString:TTSCurVoice()]);
     cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     cell.backgroundColor = UIColor.whiteColor;
     return cell;
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     NSString *name = nil;
-    BOOL isQwen = NO;
-    NSUInteger qwIdx = 0;
+    BOOL isQwen = NO, isEdge = NO;
+    NSUInteger qwIdx = 0, edIdx = 0;
     if (g_voiceFilter) {
         if (ip.row >= (NSInteger)g_voiceFilter.count) return;
         name = g_voiceFilter[ip.row];
+        isEdge = [name hasPrefix:@"Edge·"];
         isQwen = [self qwIsQwenDisplay:name];
+        if (isEdge) for (NSUInteger i = 0; i < EdgeVoiceCount(); i++) if ([name isEqualToString:EdgeVoiceDisplay(i)]) { edIdx = i; break; }
         if (isQwen) for (NSUInteger i = 0; i < QW_VOICE_COUNT; i++) if ([name hasPrefix:g_qwenVoices[i][0]]) { qwIdx = i; break; }
     } else if (ip.section == 0) {
         if (ip.row >= (NSInteger)QW_VOICE_COUNT) return;
         qwIdx = (NSUInteger)ip.row;
         name = [NSString stringWithFormat:@"%@·%@", g_qwenVoices[qwIdx][0], g_qwenVoices[qwIdx][1]];
         isQwen = YES;
+    } else if (ip.section == 1) {
+        edIdx = (NSUInteger)ip.row;
+        name = EdgeVoiceDisplay(edIdx) ?: @"";
+        isEdge = YES;
     } else {
         NSArray *l = g_voices ?: @[];
         if (ip.row >= (NSInteger)l.count) return;
         name = l[ip.row];
         isQwen = NO;
+    }
+    if (isEdge) {
+        /* v5.4: 选中 Edge 音色 */
+        QwenSaveBackend(2);
+        EdgeSaveVoice(EdgeVoiceID(edIdx));
+        TTSSetVoice(name);   /* 显示名同步 */
+        self.voiceLabel.text = name;
+        [self closeVoiceList];
+        [self setStatusOnMain:[NSString stringWithFormat:@"Edge 音色：%@（语速%.2f，语气指令不生效）", EdgeVoiceID(edIdx), g_qwenRate]];
+        TTLog(@"[voice-list] edge selected %@ (%@)", name, EdgeVoiceID(edIdx));
+        return;
     }
     if (isQwen) {
         QwenSaveBackend(1);
@@ -2113,6 +2166,11 @@ static NSString *qwEmoInstruction(NSString *display) {
         g_voiceFilter = nil;
     } else {
         NSMutableArray *r = [NSMutableArray array];
+        for (NSUInteger i = 0; i < EdgeVoiceCount(); i++) {
+            NSString *dn = EdgeVoiceDisplay(i);
+            if ([dn rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [EdgeVoiceID(i) rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) [r addObject:dn];
+        }
         for (NSUInteger i = 0; i < QW_VOICE_COUNT; i++) {
             NSString *dn = [NSString stringWithFormat:@"%@·%@", g_qwenVoices[i][0], g_qwenVoices[i][1]];
             if ([dn rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) [r addObject:dn];
@@ -2439,7 +2497,11 @@ static NSString *qwEmoInstruction(NSString *display) {
         });
     };
 
-    if (g_backend == 1) {
+    if (g_backend == 2) {
+        /* v5.4: edge-tts（微软免费）——MP3 回调走同一 onAudio 管线 */
+        TTLog(@"[edge] 请求 voice=%@ rate=%.2f len=%lu", g_edgeVoice, g_qwenRate, (unsigned long)text.length);
+        RequestEdgeTTS(text, g_edgeVoice, g_qwenRate, onAudio);
+    } else if (g_backend == 1) {
         RequestQwenTTS(text, g_qwenVoice, g_qwenRate, qwEmoInstruction(g_qwenInstr), onAudio);
     } else {
         RequestTTS(text, voice, onAudio);
@@ -2832,10 +2894,11 @@ static void QQFloatV2Init(void) {
     QwenLoadState();
     TTSInstallCrashGuards();   /* 崩了落 Documents/QQFloatCrash.log（信号+地址+dylib基址） */
     WXChainSetLogPath(g_logPath);      /* v5.0: 微信链共用同一日志文件（行首 [WXCHAIN] 区分） */
+    EdgeSetLogPath(g_logPath);         /* v5.4: edge 链共用同一日志文件（行首 [EDGE] 区分） */
     g_isWeChatHost = WXChainIsWeChatBundle();
     if (g_isWeChatHost) {
         /* 微信宿主：不装 QQ hooks（类都不存在）；微信链 hooks 在启动通知 +3s 后安装 */
-        TTLog(@"QQFloat v5.3 init — **微信宿主**（end-obs 返回类型修复版）");
+        TTLog(@"QQFloat v5.4 init — **微信宿主**（+Edge 后端）");
         return;
     }
     InstallCodecHook();
