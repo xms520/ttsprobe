@@ -231,6 +231,7 @@ NSString *BdyyVoiceParam(NSUInteger i);
 NSString *BdyyVoiceType(NSUInteger i);
 NSString *BdyyDisplayForParam(NSString *param);
 void RequestBdyyTTS(NSString *text, NSString *voiceParam, NSString *voiceType, float rate, void (^done)(NSData *audio, NSError *error));
+static NSString *TiaxKey(void);   /* v6.0 前置声明（定义在 Tiax 段） */
 
 static NSString *g_bdyyVoice = @"1";
 static NSString *g_bdyyType  = @"basic";
