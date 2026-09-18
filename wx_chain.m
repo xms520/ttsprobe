@@ -584,22 +584,48 @@ static void WXInstallRecorderEndCapture(void) {
                 continue;
             }
             IMP oldImp = method_getImplementation(m);
-            IMP newImp = imp_implementationWithBlock(^id(id self, id arg) {
-                @autoreleasepool {
-                    g_wxRecorderEndSeen++;
-                    g_wxRecorderEndTime = [NSDate date].timeIntervalSinceReferenceDate;
-                    @synchronized([NSObject class]) {
-                        if (g_wxAudioSender != self) g_wxAudioSender = self;
-                        if (arg) g_wxRealEndUserData = arg;
-                        g_wxRealEndSelector = name;
+            /* v5.3 关键修复：block 返回类型必须照抄 types[0]。
+             * OnRecorderEndRecording: 是 v24@0:8@16 (void)；v5.2 用 ^id block → ARC 对 void 调用后
+             * x0 残留垃圾执行 retain → SIGSEGV addr=0x20（与 v4.18 codec-hook 同款错误）。
+             * 三次闪退（两次按住说话 + 一次自动发送）全部停在 [end-obs] 触发点，完全吻合。 */
+            char ert = types[0];
+            IMP newImp = NULL;
+            if (ert == 'v') {
+                newImp = imp_implementationWithBlock(^(id self, id arg) {
+                    @autoreleasepool {
+                        g_wxRecorderEndSeen++;
+                        g_wxRecorderEndTime = [NSDate date].timeIntervalSinceReferenceDate;
+                        @synchronized([NSObject class]) {
+                            if (g_wxAudioSender != self) g_wxAudioSender = self;
+                            if (arg) g_wxRealEndUserData = arg;
+                            g_wxRealEndSelector = name;
+                        }
+                        WXLog(@"[end-obs] %@ self=%p arg=%p(%@)", name, (__bridge void *)self,
+                              (__bridge void *)arg, arg ? NSStringFromClass([arg class]) : @"nil");
+                        ((void (*)(id, SEL, id))oldImp)(self, sel, arg);   /* void 转发, ARC 零介入 */
                     }
-                    WXLog(@"[end-obs] %@ self=%p arg=%p(%@)", name, (__bridge void *)self,
-                          (__bridge void *)arg, arg ? NSStringFromClass([arg class]) : @"nil");
-                }
-                return ((id (*)(id, SEL, id))oldImp)(self, sel, arg);
-            });
+                });
+            } else if (ert == '@') {
+                newImp = imp_implementationWithBlock(^id(id self, id arg) {
+                    @autoreleasepool {
+                        g_wxRecorderEndSeen++;
+                        g_wxRecorderEndTime = [NSDate date].timeIntervalSinceReferenceDate;
+                        @synchronized([NSObject class]) {
+                            if (g_wxAudioSender != self) g_wxAudioSender = self;
+                            if (arg) g_wxRealEndUserData = arg;
+                            g_wxRealEndSelector = name;
+                        }
+                        WXLog(@"[end-obs] %@ self=%p arg=%p(%@)", name, (__bridge void *)self,
+                              (__bridge void *)arg, arg ? NSStringFromClass([arg class]) : @"nil");
+                        return ((id (*)(id, SEL, id))oldImp)(self, sel, arg);
+                    }
+                });
+            } else {
+                WXLog(@"[end-obs] %@ 返回类型 %c 不支持, 跳过", name, ert);
+                continue;
+            }
             method_setImplementation(m, newImp);
-            WXLog(@"[end-obs] hooked %@ types=%s", name, types);
+            WXLog(@"[end-obs] hooked %@ types=%s ret=%c", name, types, ert);
         }
     });
 }
@@ -609,6 +635,12 @@ static void WXInstallRecorderEndCapture(void) {
  * → PCM 喂完后主线程复刻 StopRecord → 微信自己的结束链(OnRecorderEndRecording →
  *   SendOriVoiceMsgWithUserData → prepareSend)把消息发到当前会话。全程不需用户操作。 */
 void WXChainSendWithPcm(NSData *pcm, void (^status)(NSString *)) {
+    /* v5.3: 准备段（KVC 会话识别 + StartRecordFrom）必须在主线程 ——
+     * 微信 UI 对象只在主线程安全, 后台线程 KVC 读 = 竞态崩溃风险（原版 sendDirect 就是主线程） */
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ WXChainSendWithPcm(pcm, status); });
+        return;
+    }
     void (^say)(NSString *) = ^(NSString *t) { if (status && t) status(t); };
     if (!pcm.length) { say(@"PCM 为空"); return; }
 

@@ -19,6 +19,13 @@
  * v5.2: ① 该检查改为 !g_isWeChatHost 才生效; ② 面板文案按宿主区分(微信显示"点合成（微信自动发送/按住说话发送）")
  *       ③ 宿主判断加类兜底(CMessageMgr/MMServiceCenter/CMessageWrap→微信; QQPttRecordBtn/QQMsgService→QQ)
  *       ④ sendDirect 打印 [qq] sendDirect host=WECHAT/QQ 便于确认
+ * ===== v5.3（修微信三连闪退：end-obs hook 的 ARC 返回语义）=====
+ * v5.2 实测（QQFloat_6.log）：三次崩溃全部精确停在 [WXCHAIN] [end-obs] OnRecorderEndRecording: 之后
+ *   [CRASH] sig=11 addr=0x20 ×2 —— OnRecorderEndRecording: 是 v24@0:8@16 (void)，
+ *   v5.2 的 hook block 却是 ^id → ARC 对 void 调用后 x0 残留垃圾执行 retain → SIGSEGV
+ *   （与 v4.18 codec-hook 的 Q/id 同款错误；铁律再次验证：block 返回类型必须照抄 types[0]）
+ * v5.3: ① end-obs 按 types[0] 分派（v→void block / @→id block / 其它跳过）
+ *       ② WXChainSendWithPcm 准备段（KVC 会话识别 + StartRecordFrom）强制主线程
  * ===== v5.1（微信侧补手动注入路）=====
  * v5.0 实测: 微信自动路（复刻 StartRecordFrom）在没捕获会话参数时发不出去（"第一次捕捉不到"）
  * v5.1: 微信宿主双路 —— ① 会话参数齐 → 全自动；② 缺参数 → 装填 AudioQueue 替换缓存,
@@ -2828,7 +2835,7 @@ static void QQFloatV2Init(void) {
     g_isWeChatHost = WXChainIsWeChatBundle();
     if (g_isWeChatHost) {
         /* 微信宿主：不装 QQ hooks（类都不存在）；微信链 hooks 在启动通知 +3s 后安装 */
-        TTLog(@"QQFloat v5.2 init — **微信宿主**（自动发送 / 无会话参数时手动注入）");
+        TTLog(@"QQFloat v5.3 init — **微信宿主**（end-obs 返回类型修复版）");
         return;
     }
     InstallCodecHook();
