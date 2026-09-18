@@ -19,6 +19,11 @@
  * v5.2: ① 该检查改为 !g_isWeChatHost 才生效; ② 面板文案按宿主区分(微信显示"点合成（微信自动发送/按住说话发送）")
  *       ③ 宿主判断加类兜底(CMessageMgr/MMServiceCenter/CMessageWrap→微信; QQPttRecordBtn/QQMsgService→QQ)
  *       ④ sendDirect 打印 [qq] sendDirect host=WECHAT/QQ 便于确认
+ * ===== v6.0（第三后端：tiax bdyy 百度系音库）=====
+ * 火山已删；新后端 = GET www.tiax.pw/API/bdyy.php（text/voice/voice_type(basic|high|premium)/speed 0-9/pitch/volume/format=mp3/return_type=base64/apikey）
+ * ⚠️ 实测 2026-09-18 服务端 503 "语音服务尚未配置"（站长未上线）→ 接口已预接，上线即通；音色表待实测修正
+ * ===== v5.9（删除火山豆包后端）=====
+ * 用户要求移除火山；TTS 后端 = 千问(1) + 原接口(0) + tiax bdyy(2, 见 v5.9b)；旧 backend=2 持久化值清零
  * ===== v5.8（音色收敛到已授权集 + 灿灿接情绪）=====
  * 真机日志判决: 11 音色中仅灿灿 code=3000，其余 10 个 code=3001 requested resource not granted
  *   → 火山音色需在控制台「语音合成大模型→音色管理」单独添加授权（多数免费）
@@ -217,20 +222,24 @@ void WXChainSendWithPcm(NSData *pcm, void (^status)(NSString *text));
 BOOL WXChainHasSession(void);
 void WXChainArmInjectionWithPcm(NSData *pcm);
 
-/* ===== v5.6 第三后端：火山引擎豆包 TTS（volctts.m 提供） ===== */
-NSUInteger VolcVoiceCount(void);
-NSString *VolcVoiceDisplay(NSUInteger i);
-NSString *VolcVoiceID(NSUInteger i);
-NSString *VolcDisplayForID(NSString *vid);
-void VolcSetLogPath(NSString *p);
-void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, NSString *emotion, void (^done)(NSData *audio, NSError *error));
-NSString *VolcEmotionForDisplay(NSString *disp);
+/* ===== v6.0 第三后端：tiax bdyy（百度系音库 basic/high/premium） =====
+ * GET www.tiax.pw/API/bdyy.php?text&voice&voice_type&speed(0-9)&pitch&volume&format=mp3&return_type=base64&apikey
+ * ⚠️ 2026-09-18 实测 503 "语音服务尚未配置"（服务端未上线）；接口已预接，配置好即通 */
+NSUInteger BdyyVoiceCount(void);
+NSString *BdyyVoiceDisplay(NSUInteger i);
+NSString *BdyyVoiceParam(NSUInteger i);
+NSString *BdyyVoiceType(NSUInteger i);
+NSString *BdyyDisplayForParam(NSString *param);
+void RequestBdyyTTS(NSString *text, NSString *voiceParam, NSString *voiceType, float rate, void (^done)(NSData *audio, NSError *error));
 
-static NSString *g_volcVoice = @"zh_female_cancan_mars_bigtts";
-static NSString *const kVolcVoiceKey = @"TTSFloatVolcVoice";
-static void VolcSaveVoice(NSString *vid) {
-    g_volcVoice = vid ?: @"zh_female_cancan_mars_bigtts";
-    [NSUserDefaults.standardUserDefaults setObject:g_volcVoice forKey:kVolcVoiceKey];
+static NSString *g_bdyyVoice = @"1";
+static NSString *g_bdyyType  = @"basic";
+static NSString *const kBdyyVoiceKey = @"TTSFloatBdyyVoice";
+static NSString *const kBdyyTypeKey  = @"TTSFloatBdyyType";
+static void BdyySave(NSString *v, NSString *t) {
+    g_bdyyVoice = v ?: @"1"; g_bdyyType = t ?: @"basic";
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    [d setObject:g_bdyyVoice forKey:kBdyyVoiceKey]; [d setObject:g_bdyyType forKey:kBdyyTypeKey];
 }
 
 static BOOL g_isWeChatHost = NO;
@@ -632,12 +641,84 @@ static NSString *QwenDisplayFromID(NSString *vid) {
 }
 
 /* 后端状态读写（持久化） */
+/* ===== bdyy 音色表（voice 参数 / 音库）—— 接口上线后按实测修正 ===== */
+static NSString *const g_bdyyVoiceTable[][3] = {
+    {@"百度·度小美(标准女声)",  @"xiaomei",  @"basic"},
+    {@"百度·度小宇(亲切男声)",  @"xiaoyu",   @"basic"},
+    {@"百度·度逍遥(情感男声)",  @"xiaoyao",  @"basic"},
+    {@"百度·度丫丫(童声)",      @"yaya",     @"basic"},
+    {@"百度·度小娇(成熟女主播)",@"xiaojiao", @"basic"},
+    {@"百度·度博文(专业男主播)",@"bowen",    @"basic"},
+    {@"百度·度小鹿(甜美女声)",  @"xiaolu",   @"basic"},
+    {@"百度·度小萌(软萌妹子)",  @"xiaomeng", @"basic"},
+    {@"百度·度逍遥(臻品)",      @"xiaoyaozp",@"premium"},
+    {@"百度·度博文(臻品)",      @"bowenzp",  @"premium"},
+    {@"百度·度小鹿(臻品)",      @"xiaoluzp", @"premium"},
+    {@"百度·度禧禧(阳光女声)",  @"xixi",     @"high"},
+    {@"百度·度泽言(温暖男声)",  @"zeyan",    @"high"},
+    {@"百度·度泽言(开朗·多情感)",@"zeyan2",  @"high"},
+    {@"百度·度涵竹(开朗·多情感)",@"hanzhu",  @"high"},
+    {@"百度·度嫣然(活泼·多情感)",@"yanran",  @"high"},
+    {@"百度·度怀安(磁性·多情感)",@"huaian",  @"high"},
+    {@"百度·度清影(甜美·多情感)",@"qingying",@"high"},
+    {@"百度·度沁遥(知性女声)",  @"qinyao",   @"high"},
+    {@"百度·度小柔(温柔女声)",  @"xiaorou",  @"high"},
+    {@"百度·度言浩(年轻男声)",  @"yanhao",   @"high"},
+    {@"百度·度言静(明亮女声)",  @"yanjing",  @"high"},
+    {@"百度·度小粤(粤语女声)",  @"yue",      @"basic"},
+    {@"百度·度晓芸(粤语女声)",  @"yue2",     @"basic"},
+    {@"百度·四川小哥(川话)",    @"sichuan",  @"basic"},
+    {@"百度·东北话女声",        @"dongbei",  @"basic"},
+    {@"百度·北京话男声",        @"beijing",  @"basic"},
+    {@"百度·上海话女声",        @"shanghai", @"basic"},
+    {@"百度·陕西话女声",        @"shanxi",   @"basic"},
+    {@"百度·天津话女声",        @"tianjin",  @"basic"},
+    {@"百度·台湾腔女声",        @"taiwan",   @"basic"},
+};
+#define BDYY_VOICE_COUNT (sizeof(g_bdyyVoiceTable) / sizeof(g_bdyyVoiceTable[0]))
+NSUInteger BdyyVoiceCount(void) { return BDYY_VOICE_COUNT; }
+NSString *BdyyVoiceDisplay(NSUInteger i) { return (i < BDYY_VOICE_COUNT) ? g_bdyyVoiceTable[i][0] : nil; }
+NSString *BdyyVoiceParam(NSUInteger i)  { return (i < BDYY_VOICE_COUNT) ? g_bdyyVoiceTable[i][1] : nil; }
+NSString *BdyyVoiceType(NSUInteger i)   { return (i < BDYY_VOICE_COUNT) ? g_bdyyVoiceTable[i][2] : nil; }
+NSString *BdyyDisplayForParam(NSString *param) {
+    for (NSUInteger i = 0; i < BDYY_VOICE_COUNT; i++)
+        if ([g_bdyyVoiceTable[i][1] isEqualToString:param]) return g_bdyyVoiceTable[i][0];
+    return param;
+}
+void RequestBdyyTTS(NSString *text, NSString *voiceParam, NSString *voiceType, float rate, void (^done)(NSData *audio, NSError *error)) {
+    if (!text.length) { if (done) done(nil, [NSError errorWithDomain:@"bdyy" code:1
+        userInfo:@{NSLocalizedDescriptionKey:@"文本为空"}]); return; }
+    int sp = (int)lroundf((rate - 1.0f) * 4.5f) + 5; sp = MIN(9, MAX(0, sp));
+    NSString *enc = [text stringByAddingPercentEncodingWithAllowedCharacters:
+        [NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *url = [NSString stringWithFormat:
+        @"https://www.tiax.pw/API/bdyy.php?text=%@&voice=%@&voice_type=%@&speed=%d&pitch=5&volume=5&format=mp3&return_type=base64&apikey=%@",
+        enc, voiceParam, voiceType, sp, TiaxKey()];
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:url]
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            if (err) { if (done) done(nil, err); return; }
+            NSDictionary *j = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (j && j[@"status"]) {   /* {"status":"error","message":..} */
+                if (done) done(nil, [NSError errorWithDomain:@"bdyy" code:2
+                    userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"bdyy: %@", j[@"message"] ?: @"服务端错误"]}]);
+                return;
+            }
+            NSString *b64 = [j isKindOfClass:[NSDictionary class]] ? (j[@"data"] ?: @"") : @"";
+            NSData *mp3 = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+            if (!mp3.length) { if (done) done(nil, [NSError errorWithDomain:@"bdyy" code:3
+                userInfo:@{NSLocalizedDescriptionKey:@"bdyy 返回无音频数据"}]); return; }
+            if (done) done(mp3, nil);
+        }];
+    [task resume];
+}
+
 static void QwenLoadState(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     NSInteger b = [d integerForKey:kBackendKey];
-    g_backend = (b == 2) ? 2 : ((b == 1) ? 1 : 0);   /* v5.4: 0=原接口 1=千问 2=Edge */
-    NSString *ev = [d stringForKey:kVolcVoiceKey];
-    if (ev.length) g_volcVoice = ev;
+    g_backend = (b == 2) ? 2 : ((b == 1) ? 1 : 0);   /* v6.0: 0=原接口 1=千问 2=bdyy */
+    NSString *bv = [d stringForKey:kBdyyVoiceKey], *bt = [d stringForKey:kBdyyTypeKey];
+    if (bv.length) g_bdyyVoice = bv;
+    if (bt.length) g_bdyyType = bt;
     NSString *v = [d stringForKey:kQwenVoiceKey];
     if (v.length) g_qwenVoice = v;
     double r = [d doubleForKey:kQwenRateKey];
@@ -1589,7 +1670,7 @@ static UIImage *TTSLoadBallImage(void) {
 
     /* 音色异步加载完成后刷新标题（v30: 千问后端直接显示，不等原接口） */
     if (g_backend == 2) {
-        self.voiceLabel.text = [NSString stringWithFormat:@"[豆包] %@ %.2fx", VolcDisplayForID(g_volcVoice), g_qwenRate];
+        self.voiceLabel.text = [NSString stringWithFormat:@"[bdyy] %@ %.2fx", BdyyDisplayForParam(g_bdyyVoice), g_qwenRate];
     } else if (g_backend == 1) {
         self.voiceLabel.text = [NSString stringWithFormat:@"[千问] %@ %.2fx%@",
             g_qwenVoice, g_qwenRate, g_qwenInstr.length ? [NSString stringWithFormat:@" ·%@", g_qwenInstr] : @""];
@@ -1737,7 +1818,7 @@ static UIImage *TTSLoadBallImage(void) {
     NSUInteger n = g_voices.count;
     NSString *title;
     if (g_backend == 1) {
-        title = [NSString stringWithFormat:@"选择音色（千问48 + 豆包%lu + 原%lu）", (unsigned long)VolcVoiceCount(), (unsigned long)n];
+        title = [NSString stringWithFormat:@"选择音色（千问48 + 原%lu）", (unsigned long)g_voices.count, (unsigned long)n];
     } else {
         title = n ? [NSString stringWithFormat:@"选择音色（千问48 + 原%lu）", (unsigned long)n]
                   : (g_voiceFetchState < 0 ? @"原接口加载失败，千问可用" : @"选择音色（千问48 + 原加载中…）");
@@ -2057,7 +2138,7 @@ static NSString *qwEmoInstruction(NSString *display) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return g_voiceFilter ? 1 : 3;   /* v5.4: 搜索时单段；平时 千问段 + Edge段 + 原接口段 */
+    return g_voiceFilter ? 1 : 3;   /* v6.0: 千问段 + bdyy段 + 原接口段 */
 }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
     if (g_voiceFilter) {
@@ -2065,13 +2146,13 @@ static NSString *qwEmoInstruction(NSString *display) {
         return (NSInteger)g_voiceFilter.count;
     }
     if (s == 0) return (NSInteger)QW_VOICE_COUNT;          /* 千问 48 */
-    if (s == 1) return (NSInteger)VolcVoiceCount();        /* v5.6: 豆包音色 */
+    if (s == 1) return (NSInteger)BdyyVoiceCount();        /* v6.0: bdyy 音色 */
     return (NSInteger)(g_voices ?: @[]).count;             /* 原接口（可能还在加载） */
 }
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
     if (g_voiceFilter) return nil;
     if (s == 0) return @"千问（48 音色 · 支持语气/语速）";
-    if (s == 1) return @"豆包（火山引擎 · 大模型音色 · 语速有效）";
+    if (s == 1) return @"百度 bdyy（基础/精品/臻品 · 语速音调可调）";
     return [NSString stringWithFormat:@"原接口（%lu 音色）", (unsigned long)(g_voices ?: @[]).count];
 }
 /* v30: 显示名是否千问（"ID·中文名" 形态，按 ID 前缀判定） */
@@ -2087,14 +2168,14 @@ static NSString *qwEmoInstruction(NSString *display) {
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
     NSString *name = nil;
-    BOOL isQwen = NO, isEdge = NO;
-    NSUInteger qwIdx = 0, edIdx = 0;
+    BOOL isQwen = NO, isBdyy = NO;
+    NSUInteger qwIdx = 0, bdIdx = 0;
     if (g_voiceFilter) {
         if (ip.row >= (NSInteger)g_voiceFilter.count) { cell.textLabel.text = @""; return cell; }
         name = g_voiceFilter[ip.row];
-        isEdge = [name hasPrefix:@"豆包·"];
+        isBdyy = [name hasPrefix:@"百度·"];
         isQwen = [self qwIsQwenDisplay:name];
-        if (isEdge) for (NSUInteger i = 0; i < VolcVoiceCount(); i++) if ([name isEqualToString:VolcVoiceDisplay(i)]) { edIdx = i; break; }
+        if (isBdyy) for (NSUInteger i = 0; i < BdyyVoiceCount(); i++) if ([name isEqualToString:BdyyVoiceDisplay(i)]) { bdIdx = i; break; }
         if (isQwen) for (NSUInteger i = 0; i < QW_VOICE_COUNT; i++) if ([name hasPrefix:g_qwenVoices[i][0]]) { qwIdx = i; break; }
     } else if (ip.section == 0) {
         if (ip.row >= (NSInteger)QW_VOICE_COUNT) { cell.textLabel.text = @""; return cell; }
@@ -2102,9 +2183,9 @@ static NSString *qwEmoInstruction(NSString *display) {
         name = [NSString stringWithFormat:@"%@·%@", g_qwenVoices[qwIdx][0], g_qwenVoices[qwIdx][1]];
         isQwen = YES;
     } else if (ip.section == 1) {
-        edIdx = (NSUInteger)ip.row;
-        name = VolcVoiceDisplay(edIdx) ?: @"";
-        isEdge = YES;
+        bdIdx = (NSUInteger)ip.row;
+        name = BdyyVoiceDisplay(bdIdx) ?: @"";
+        isBdyy = YES;
     } else {
         NSArray *l = g_voices ?: @[];
         if (ip.row >= (NSInteger)l.count) { cell.textLabel.text = @""; return cell; }
@@ -2116,7 +2197,8 @@ static NSString *qwEmoInstruction(NSString *display) {
     cell.textLabel.textColor = UIColor.blackColor;
     BOOL selected;
     if (isQwen)      selected = (g_backend == 1 && [g_qwenVoices[qwIdx][0] isEqualToString:g_qwenVoice]);
-    else if (isEdge) selected = (g_backend == 2 && [VolcVoiceID(edIdx) isEqualToString:g_volcVoice]);
+    else if (isBdyy) selected = (g_backend == 2 && [BdyyVoiceParam(bdIdx) isEqualToString:g_bdyyVoice]
+                                 && [BdyyVoiceType(bdIdx) isEqualToString:g_bdyyType]);
     else             selected = (g_backend == 0 && [name isEqualToString:TTSCurVoice()]);
     cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     cell.backgroundColor = UIColor.whiteColor;
@@ -2124,40 +2206,34 @@ static NSString *qwEmoInstruction(NSString *display) {
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     NSString *name = nil;
-    BOOL isQwen = NO, isEdge = NO;
-    NSUInteger qwIdx = 0, edIdx = 0;
+    BOOL isQwen = NO, isBdyy = NO;
+    NSUInteger qwIdx = 0, bdIdx = 0;
     if (g_voiceFilter) {
         if (ip.row >= (NSInteger)g_voiceFilter.count) return;
         name = g_voiceFilter[ip.row];
-        isEdge = [name hasPrefix:@"豆包·"];
         isQwen = [self qwIsQwenDisplay:name];
-        if (isEdge) for (NSUInteger i = 0; i < VolcVoiceCount(); i++) if ([name isEqualToString:VolcVoiceDisplay(i)]) { edIdx = i; break; }
+        isQwen = [self qwIsQwenDisplay:name];
         if (isQwen) for (NSUInteger i = 0; i < QW_VOICE_COUNT; i++) if ([name hasPrefix:g_qwenVoices[i][0]]) { qwIdx = i; break; }
     } else if (ip.section == 0) {
         if (ip.row >= (NSInteger)QW_VOICE_COUNT) return;
         qwIdx = (NSUInteger)ip.row;
         name = [NSString stringWithFormat:@"%@·%@", g_qwenVoices[qwIdx][0], g_qwenVoices[qwIdx][1]];
         isQwen = YES;
-    } else if (ip.section == 1) {
-        edIdx = (NSUInteger)ip.row;
-        name = VolcVoiceDisplay(edIdx) ?: @"";
-        isEdge = YES;
     } else {
         NSArray *l = g_voices ?: @[];
         if (ip.row >= (NSInteger)l.count) return;
         name = l[ip.row];
         isQwen = NO;
     }
-    if (isEdge) {
-        /* v5.4: 选中 Edge 音色 */
+    if (isBdyy) {
         QwenSaveBackend(2);
-        VolcSaveVoice(VolcVoiceID(edIdx));
-        TTSSetVoice(name);   /* 显示名同步 */
+        BdyySave(BdyyVoiceParam(bdIdx), BdyyVoiceType(bdIdx));
+        TTSSetVoice(name);
         self.voiceLabel.text = name;
         [self.input resignFirstResponder];
         [self closeVoiceList];
-        [self setStatusOnMain:[NSString stringWithFormat:@"本地语音：%@（语速%.2f）", VolcDisplayForID(VolcVoiceID(edIdx)), g_qwenRate]];
-        TTLog(@"[voice-list] volc selected %@ (%@)", name, VolcVoiceID(edIdx));
+        [self setStatusOnMain:[NSString stringWithFormat:@"bdyy 音色：%@（语速%.2f）", name, g_qwenRate]];
+        TTLog(@"[voice-list] bdyy selected %@ (%@/%@)", name, BdyyVoiceParam(bdIdx), BdyyVoiceType(bdIdx));
         return;
     }
     if (isQwen) {
@@ -2191,10 +2267,9 @@ static NSString *qwEmoInstruction(NSString *display) {
         g_voiceFilter = nil;
     } else {
         NSMutableArray *r = [NSMutableArray array];
-        for (NSUInteger i = 0; i < VolcVoiceCount(); i++) {
-            NSString *dn = VolcVoiceDisplay(i);
-            if ([dn rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [VolcVoiceID(i) rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) [r addObject:dn];
+        for (NSUInteger i = 0; i < BdyyVoiceCount(); i++) {
+            NSString *dn = BdyyVoiceDisplay(i);
+            if ([dn rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) [r addObject:dn];
         }
         for (NSUInteger i = 0; i < QW_VOICE_COUNT; i++) {
             NSString *dn = [NSString stringWithFormat:@"%@·%@", g_qwenVoices[i][0], g_qwenVoices[i][1]];
@@ -2523,10 +2598,10 @@ static NSString *qwEmoInstruction(NSString *display) {
     };
 
     if (g_backend == 2) {
-        /* v5.5: 本地系统语音（离线）——WAV 回调走同一 onAudio 管线 */
-        NSString *emo = VolcEmotionForDisplay(g_qwenInstr);   /* v5.8: 情绪标签 → 火山 emotion */
-        TTLog(@"[volc] 请求 voice=%@ rate=%.2f emo=%@ len=%lu", g_volcVoice, g_qwenRate, emo ?: @"-", (unsigned long)text.length);
-        RequestVolcTTS(text, g_volcVoice, g_qwenRate, emo, onAudio);
+        int sp = (int)lroundf((g_qwenRate - 1.0f) * 4.5f) + 5;
+        sp = MIN(9, MAX(0, sp));
+        TTLog(@"[bdyy] 请求 param=%@ type=%@ speed=%d len=%lu", g_bdyyVoice, g_bdyyType, sp, (unsigned long)text.length);
+        RequestBdyyTTS(text, g_bdyyVoice, g_bdyyType, g_qwenRate, onAudio);
     } else if (g_backend == 1) {
         RequestQwenTTS(text, g_qwenVoice, g_qwenRate, qwEmoInstruction(g_qwenInstr), onAudio);
     } else {
@@ -2920,11 +2995,10 @@ static void QQFloatV2Init(void) {
     QwenLoadState();
     TTSInstallCrashGuards();   /* 崩了落 Documents/QQFloatCrash.log（信号+地址+dylib基址） */
     WXChainSetLogPath(g_logPath);      /* v5.0: 微信链共用同一日志文件（行首 [WXCHAIN] 区分） */
-    VolcSetLogPath(g_logPath);         /* v5.6: 火山链共用同一日志文件（行首 [VOLC] 区分） */
     g_isWeChatHost = WXChainIsWeChatBundle();
     if (g_isWeChatHost) {
         /* 微信宿主：不装 QQ hooks（类都不存在）；微信链 hooks 在启动通知 +3s 后安装 */
-        TTLog(@"QQFloat v5.8 init — **微信宿主**（豆包·灿灿+情绪）");
+        TTLog(@"QQFloat v6.0 init — **微信宿主**（+bdyy 后端）（豆包·灿灿+情绪）");
         return;
     }
     InstallCodecHook();
