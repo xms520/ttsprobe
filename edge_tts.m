@@ -187,7 +187,8 @@ void RequestEdgeTTS(NSString *text, NSString *voiceID, float rate, void (^done)(
                 } else if (msg.type == NSURLSessionWebSocketMessageTypeData) {
                     NSData *d = msg.data;
                     if (d.length > 2) {
-                        NSUInteger hl = ((NSUInteger)d.bytes[0] << 8) | (NSUInteger)d.bytes[1];
+                        const unsigned char *bp = (const unsigned char *)d.bytes;
+                        NSUInteger hl = ((NSUInteger)bp[0] << 8) | (NSUInteger)bp[1];
                         if (d.length > hl + 2) {
                             NSString *hs = [[NSString alloc] initWithData:[d subdataWithRange:NSMakeRange(2, hl)]
                                                                  encoding:NSUTF8StringEncoding] ?: @"";
