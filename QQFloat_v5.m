@@ -1639,6 +1639,7 @@ static UIImage *TTSLoadBallImage(void) {
 }
 
 - (void)showTip {
+    [self.input resignFirstResponder];   /* v5.5: 打赏时收起键盘 */
     if (self.tipMask) return;
     CGRect sc = UIScreen.mainScreen.bounds;
     UIView *mask = [[UIView alloc] initWithFrame:sc];
@@ -1706,6 +1707,7 @@ static UIImage *TTSLoadBallImage(void) {
 
 /* ==================== v25: 音色选择列表（可搜索，458 个） ==================== */
 - (void)showVoiceList {
+    [self.input resignFirstResponder];   /* v5.5: 打开音色列表时收起键盘 */
     [self closeVoiceList];
 
     CGRect scr = UIScreen.mainScreen.bounds;
@@ -2142,6 +2144,7 @@ static NSString *qwEmoInstruction(NSString *display) {
         LocalSaveVoice(LocalVoiceID(edIdx));
         TTSSetVoice(name);   /* 显示名同步 */
         self.voiceLabel.text = name;
+        [self.input resignFirstResponder];
         [self closeVoiceList];
         [self setStatusOnMain:[NSString stringWithFormat:@"本地语音：%@（语速%.2f）", LocalDisplayForID(LocalVoiceID(edIdx)), g_qwenRate]];
         TTLog(@"[voice-list] local selected %@ (%@)", name, LocalVoiceID(edIdx));
@@ -2152,6 +2155,7 @@ static NSString *qwEmoInstruction(NSString *display) {
         QwenSaveVoice(g_qwenVoices[qwIdx][0]);
         TTSSetVoice(name);   /* 显示名同步，跨后端回切保持 */
         self.voiceLabel.text = name;
+        [self.input resignFirstResponder];
         [self closeVoiceList];
         [self setStatusOnMain:[NSString stringWithFormat:@"千问音色：%@（语速%.2f）", g_qwenVoices[qwIdx][0], g_qwenRate]];
         TTLog(@"[voice-list] qwen selected %@ rate=%.2f", g_qwenVoices[qwIdx][0], g_qwenRate);
@@ -2159,12 +2163,17 @@ static NSString *qwEmoInstruction(NSString *display) {
         QwenSaveBackend(0);
         TTSSetVoice(name);
         self.voiceLabel.text = name;
+        [self.input resignFirstResponder];
         [self closeVoiceList];
         [self setStatusOnMain:[NSString stringWithFormat:@"原接口音色：%@", name]];
         TTLog(@"[voice-list] legacy selected %@", name);
     }
 }
 
+- (BOOL)searchBarShouldBeginEditing:(UISearchBar *)sb { return YES; }   /* v5.5: 点搜索框允许弹键盘 */
+- (void)searchBarTextDidBeginEditing:(UISearchBar *)sb {
+    [sb becomeFirstResponder];   /* v5.5: 点击搜索音色输入框时呼出键盘 */
+}
 /* v30: 搜索过滤（千问+原接口合搜） */
 - (void)searchBar:(UISearchBar *)sb textDidChange:(NSString *)text {
     NSString *q = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
