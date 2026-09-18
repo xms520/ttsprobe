@@ -113,7 +113,7 @@ static NSData *LocalMakeWav(NSData *pcm) {
 
 /* ===== 合成主流程（AVSpeechSynthesizer.write，iOS13+） ===== */
 void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)(NSData *audio, NSError *error)) {
-    if (!text.length) { if (done) done(nil, [NSError errorWithDomain:"local" code:1
+    if (!text.length) { if (done) done(nil, [NSError errorWithDomain:@"local" code:1
         userInfo:@{NSLocalizedDescriptionKey:@"文本为空"}]); return; }
     if (@available(iOS 13.0, *)) {
         LocalLoadVoices();
@@ -121,7 +121,7 @@ void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)
         for (AVSpeechSynthesisVoice *v in g_lcVoices)
             if ([v.identifier isEqualToString:voiceID]) { voice = v; break; }
         if (!voice) voice = (g_lcVoices.count ? g_lcVoices[0] : nil);
-        if (!voice) { if (done) done(nil, [NSError errorWithDomain:"local" code:2
+        if (!voice) { if (done) done(nil, [NSError errorWithDomain:@"local" code:2
             userInfo:@{NSLocalizedDescriptionKey:@"系统无可用语音"}]); return; }
 
         AVSpeechUtterance *u = [AVSpeechUtterance speechUtteranceWithString:text];
@@ -132,7 +132,7 @@ void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)
 
         AVSpeechSynthesizer *syn = [[AVSpeechSynthesizer alloc] init];
         NSMutableArray *chunks = [NSMutableArray array];       /* NSData(float32 ch0) */
-        AVAudioFormat *fmt0 = nil;
+        __block AVAudioFormat *fmt0 = nil;
         __block AVAudioFrameCount totalFrames = 0;
         __block BOOL finished = NO;
 
@@ -171,7 +171,7 @@ void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)
                  }];
                 if (cerr || !outBuf || outBuf.frameLength == 0) {
                     LocalLog(@"[local] 重采样失败 %@", cerr);
-                    if (done) done(nil, [NSError errorWithDomain:"local" code:4
+                    if (done) done(nil, [NSError errorWithDomain:@"local" code:4
                         userInfo:@{NSLocalizedDescriptionKey:@"本地合成重采样失败"}]);
                     return;
                 }
@@ -187,7 +187,7 @@ void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)
                 if (done) done(LocalMakeWav(pcm), nil);
             } @catch (NSException *e) {
                 LocalLog(@"[local] 收尾异常 %@", e);
-                if (done) done(nil, [NSError errorWithDomain:"local" code:5
+                if (done) done(nil, [NSError errorWithDomain:@"local" code:5
                     userInfo:@{NSLocalizedDescriptionKey:@"本地合成收尾异常"}]);
             }
         };
@@ -220,7 +220,7 @@ void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)
                     if (idle >= 3) { finish(nil); return; }   /* 连续 0.6s 不在说且已有数据 → 完成 */
                 } else idle = 0;
                 waited += 200;
-                if (waited > 30000) { finish([NSError errorWithDomain:"local" code:3
+                if (waited > 30000) { finish([NSError errorWithDomain:@"local" code:3
                     userInfo:@{NSLocalizedDescriptionKey:@"本地合成超时"}]); return; }
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                                dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), poll);
@@ -228,7 +228,7 @@ void RequestLocalTTS(NSString *text, NSString *voiceID, float rate, void (^done)
             poll();
         });
     } else {
-        if (done) done(nil, [NSError errorWithDomain:"local" code:9
+        if (done) done(nil, [NSError errorWithDomain:@"local" code:9
             userInfo:@{NSLocalizedDescriptionKey:@"本地合成需要 iOS 13+"}]);
     }
 }
