@@ -64,8 +64,8 @@ static NSString *VolcXor(NSString *hex) {
     }
     return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
 }
-static NSString *VolcToken(void)  { return VolcXor(@"5d4e57110c5f0b0f0c0b5f0511055e050811085f0858115e580d58110b0b0b5d04585d0b0a0a0c0b1109055e5f0f"); }
-static NSString *VolcAppID(void)  { return VolcXor(@"6a73707f637d6c6c7578636c707d7f7974737078796e"); }
+static NSString *VolcToken(void)  { return VolcXor(@"5f72480a58655e780e585b7a63080c4d755e490c5b6f527350044e7b567f580f"); }
+static NSString *VolcAppID(void)  { return VolcXor(@"05080f080a0a0e050a0b"); }
 
 void RequestVolcTTS(NSString *text, NSString *voiceID, float rate, void (^done)(NSData *audio, NSError *error)) {
     if (!text.length) { if (done) done(nil, [NSError errorWithDomain:@"volc" code:1
